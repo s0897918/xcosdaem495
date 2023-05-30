@@ -1,0 +1,103 @@
+import torch
+import time
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import os
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+model_lists = [
+"facebook/opt-350m",
+"facebook/opt-1.3b",
+"facebook/opt-6.7b",
+"facebook/opt-13b",
+#"facebook/opt-66b",
+]
+
+for model_list in model_lists:
+  model_dev = model_list.split("/")[0]
+  model_name = model_list.split("/")[1]
+  
+  in_out_length = {128:32}
+  d_type = torch.float16
+  device = "cuda:2"
+  #device = "cpu"
+
+  warm_up = False
+
+  cache = True
+  if  device == "cpu":
+      model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type)
+  else:
+      model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type).cuda(device)
+  tokenizer = AutoTokenizer.from_pretrained(model_list, use_fast=False)
+
+  print("[INFO] model: " + model_name)
+  print("batch, input_length, output_length, total_latency(ms), input_latency(ms), output_latency(ms), 1-token_output_latency(ms)")
+
+  model.eval()
+  batch_exp = 7
+  #import pdb
+  #pdb.set_trace()
+
+  for k, v in in_out_length.items():
+    for b in range(0, batch_exp):
+      batch = 2 ** b
+      if warm_up == True:
+        if  device == "cpu":
+            input_ids = torch.randint(20, 50000, (batch, k))
+        else:
+            input_ids = torch.randint(20, 50000, (batch, k)).cuda(device)
+
+        gen_tokens = model.generate(
+            input_ids,
+            do_sample=False,
+            temperature=0.9,
+            max_length=k + 1,
+            use_cache=cache,
+            pad_token_id=tokenizer.eos_token_id
+        )
+      if  device == "cpu":
+        input_ids = torch.randint(20, 50000, (batch, k))
+      else:
+        input_ids = torch.randint(20, 50000, (batch, k)).cuda(device)
+      start = time.perf_counter()
+      gen_tokens = model.generate(
+        input_ids,
+        do_sample=False,
+        temperature=0.9,
+        max_length=k + 1,
+        use_cache=cache,
+        pad_token_id=tokenizer.eos_token_id
+      )
+      end = time.perf_counter() - start
+      in_latency = end
+
+      if warm_up == True:
+        if  device == "cpu":
+            input_ids = torch.randint(20, 50000, (batch, k))
+        else:
+            input_ids = torch.randint(20, 50000, (batch, k)).cuda(device)
+
+        gen_tokens = model.generate(
+            input_ids,
+            do_sample=False,
+            temperature=0.9,
+            max_length=k + v,
+            use_cache=cache,
+            pad_token_id=tokenizer.eos_token_id
+        )
+      if  device == "cpu":
+        input_ids = torch.randint(20, 50000, (batch, k))
+      else:
+        input_ids = torch.randint(20, 50000, (batch, k)).cuda(device)
+      start = time.perf_counter()
+      gen_tokens = model.generate(
+        input_ids,
+        do_sample=False,
+        temperature=0.9,
+        max_length=k + v,
+        use_cache=cache,
+        pad_token_id=tokenizer.eos_token_id
+      )
+      end = time.perf_counter() - start
+      tot_latency = end
+      print(str(batch) + ", " +  str(k) + ", " + str(v) + ", {:.0f}".format(tot_latency * 1000) + ", {:.0f}".format(in_latency * 1000) + ", {:.0f}".format((tot_latency - in_latency) * 1000) + ", {:.0f}".format((tot_latency - in_latency)/v * 1000))
