@@ -28,6 +28,9 @@ for model_list in model_lists:
       model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type)
   else:
       model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type).cuda(device)
+
+
+  model = torch.compile(model)    
   tokenizer = AutoTokenizer.from_pretrained(model_list, use_fast=False)
 
   print("[INFO] model: " + model_name)

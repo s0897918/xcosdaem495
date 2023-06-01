@@ -18,16 +18,15 @@ for model_list in model_lists:
   
   in_out_length = {128:32}
   d_type = torch.float16
-  device = "cuda:2"
+  device = "cuda:0"
   #device = "cpu"
-
-  warm_up = False
 
   cache = True
   if  device == "cpu":
       model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type)
   else:
-      model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type).cuda(device)
+      model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type, device_map="auto").cuda()
+
   tokenizer = AutoTokenizer.from_pretrained(model_list, use_fast=False)
 
   print("[INFO] model: " + model_name)
@@ -41,54 +40,17 @@ for model_list in model_lists:
   for k, v in in_out_length.items():
     for b in range(0, batch_exp):
       batch = 2 ** b
-      if warm_up == True:
-        if  device == "cpu":
-            input_ids = torch.randint(20, 50000, (batch, k))
-        else:
-            input_ids = torch.randint(20, 50000, (batch, k)).cuda(device)
-
-        gen_tokens = model.generate(
-            input_ids,
-            do_sample=False,
-            temperature=0.9,
-            max_length=k + 1,
-            use_cache=cache,
-            pad_token_id=tokenizer.eos_token_id
-        )
       if  device == "cpu":
         input_ids = torch.randint(20, 50000, (batch, k))
       else:
-        input_ids = torch.randint(20, 50000, (batch, k)).cuda(device)
+        input_ids = torch.randint(20, 50000, (batch, k)).cuda()
+
       start = time.perf_counter()
-      gen_tokens = model.generate(
-        input_ids,
-        do_sample=False,
-        temperature=0.9,
-        max_length=k + 1,
-        use_cache=cache,
-        pad_token_id=tokenizer.eos_token_id
+      gen_tokens = model.generate(input_ids, max_length=k + 1, use_cache=cache, pad_token_id=tokenizer.eos_token_id)
       )
       end = time.perf_counter() - start
       in_latency = end
 
-      if warm_up == True:
-        if  device == "cpu":
-            input_ids = torch.randint(20, 50000, (batch, k))
-        else:
-            input_ids = torch.randint(20, 50000, (batch, k)).cuda(device)
-
-        gen_tokens = model.generate(
-            input_ids,
-            do_sample=False,
-            temperature=0.9,
-            max_length=k + v,
-            use_cache=cache,
-            pad_token_id=tokenizer.eos_token_id
-        )
-      if  device == "cpu":
-        input_ids = torch.randint(20, 50000, (batch, k))
-      else:
-        input_ids = torch.randint(20, 50000, (batch, k)).cuda(device)
       start = time.perf_counter()
       gen_tokens = model.generate(
         input_ids,
@@ -100,4 +62,5 @@ for model_list in model_lists:
       )
       end = time.perf_counter() - start
       tot_latency = end
+
       print(str(batch) + ", " +  str(k) + ", " + str(v) + ", {:.0f}".format(tot_latency * 1000) + ", {:.0f}".format(in_latency * 1000) + ", {:.0f}".format((tot_latency - in_latency) * 1000) + ", {:.0f}".format((tot_latency - in_latency)/v * 1000))
