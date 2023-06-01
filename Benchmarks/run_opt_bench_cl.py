@@ -5,8 +5,8 @@ import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 model_lists = [
-"facebook/opt-350m",
-#"facebook/opt-1.3b",
+#"facebook/opt-350m",
+"facebook/opt-1.3b",
 #"facebook/opt-6.7b",
 #"facebook/opt-13b",
 #"facebook/opt-66b",
@@ -15,52 +15,49 @@ model_lists = [
 for model_list in model_lists:
   model_dev = model_list.split("/")[0]
   model_name = model_list.split("/")[1]
-  
-  in_out_length = {128:32}
-  d_type = torch.float16
   device = "cuda:0"
-  #device = "cpu"
+  distributed = True
+  query_answer_length = {128:128}
+  d_type = torch.float16
 
-  cache = True
-  if  device == "cpu":
-      model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type)
+  if  distributed == True:
+      model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type, device_map = 'auto')
   else:
-      model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type, device_map="auto").cuda()
+      model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type).cuda(device)
 
   tokenizer = AutoTokenizer.from_pretrained(model_list, use_fast=False)
 
   print("[INFO] model: " + model_name)
-  print("batch, input_length, output_length, total_latency(ms), input_latency(ms), output_latency(ms), 1-token_output_latency(ms)")
+  print("batch, query_length, answer_length, query_latency(ms), answer_latency(ms), total_latency(ms), 1-token_output_latency(ms), tokens/second")
 
   model.eval()
-  batch_exp = 7
-  #import pdb
-  #pdb.set_trace()
+  batch_exp = 1
 
-  for k, v in in_out_length.items():
+  for q, a in query_answer_length.items():
     for b in range(0, batch_exp):
-      batch = 2 ** b
-      if  device == "cpu":
-        input_ids = torch.randint(20, 50000, (batch, k))
-      else:
-        input_ids = torch.randint(20, 50000, (batch, k)).cuda()
+      batch = 2**b
+
+      input_ids = torch.randint(20, 50000, (batch, q)).cuda()
 
       start = time.perf_counter()
-      gen_tokens = model.generate(input_ids, max_length=k + 1, use_cache=cache, pad_token_id=tokenizer.eos_token_id)
-      )
+      gen_tokens = model.generate(input_ids, min_length = a + 1, max_length = a + 1, pad_token_id=tokenizer.eos_token_id)
       end = time.perf_counter() - start
-      in_latency = end
+      query_latency = end
 
       start = time.perf_counter()
-      gen_tokens = model.generate(
-        input_ids,
-        do_sample=False,
-        temperature=0.9,
-        max_length=k + v,
-        use_cache=cache,
-        pad_token_id=tokenizer.eos_token_id
-      )
+      gen_tokens = model.generate(input_ids, min_length = q + a + 1, max_length = q + a + 1, pad_token_id=tokenizer.eos_token_id)
       end = time.perf_counter() - start
-      tot_latency = end
+      total_latency = end
 
-      print(str(batch) + ", " +  str(k) + ", " + str(v) + ", {:.0f}".format(tot_latency * 1000) + ", {:.0f}".format(in_latency * 1000) + ", {:.0f}".format((tot_latency - in_latency) * 1000) + ", {:.0f}".format((tot_latency - in_latency)/v * 1000))
+      answer_lantency = total_latency - query_latency
+      token_output_latency = answer_lantency/a * 1000
+      tokens_per_second = (1000/token_output_latency)*batch
+      
+      print(str(batch).rjust(len('batch')) + ", " +
+            str(q).rjust(len('query_length')) + ", " +
+            str(a).rjust(len('answer_length')) + ", " +
+            "{:.0f}".format(query_latency * 1000).rjust(len('query_latency(ms)')) + ", " +
+            "{:.0f}".format(answer_lantency * 1000).rjust(len('answer_latency(ms)')) +  ", " +
+            "{:.0f}".format(total_latency * 1000).rjust(len('total_latency(ms)')) + ", " +
+            "{:.0f}".format(token_output_latency).rjust(len('1-token_output_latency(ms)')) + ", " +
+            "{:.0f}".format(tokens_per_second).rjust(len('tokens_second'))) 
