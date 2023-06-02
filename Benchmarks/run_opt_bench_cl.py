@@ -13,6 +13,11 @@ model_lists = [
 #"facebook/opt-66b",
 ]
 
+# README
+# Run the script using single GPU:
+# python3 run_opt_bench_cl.py
+# Run the script using multiple GPUs:
+# python3 run_opt_bench_cl.py gpus
 
 distributed = False
 if (len(sys.argv) != 1):
@@ -37,6 +42,7 @@ for model_list in model_lists:
       model_name += " -multi-gpu" + " - " + device_map
       model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type, device_map = device_map)
   else:
+      model_name += " -single-gpu"
       model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type).cuda(device)
 
   tokenizer = AutoTokenizer.from_pretrained(model_list, use_fast=False)
