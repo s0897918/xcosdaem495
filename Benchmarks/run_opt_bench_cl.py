@@ -7,7 +7,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 model_lists = [
 "facebook/opt-350m",
-#"facebook/opt-1.3b",
+"facebook/opt-1.3b",
 #"facebook/opt-6.7b",
 #"facebook/opt-13b",
 #"facebook/opt-66b",
@@ -26,13 +26,16 @@ if (len(sys.argv) != 1):
 for model_list in model_lists:
   model_dev = model_list.split("/")[0]
   model_name = model_list.split("/")[1]
-  device = "cuda:2"
+  device = "cuda:0"
   query_answer_length = {128:32}
   d_type = torch.float16
+  device_map = "auto"
+  #device_map = "sequential"
+  #device_map = "balanced_low_0"
 
   if  distributed == True:
-      model_name += " in distributed version"
-      model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type, device_map = 'auto')
+      model_name += " -multi-gpu" + " - " + device_map
+      model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type, device_map = device_map)
   else:
       model = AutoModelForCausalLM.from_pretrained(model_list, torch_dtype=d_type).cuda(device)
 
@@ -44,7 +47,7 @@ for model_list in model_lists:
   print("batch, query_length, answer_length, query_latency(ms), answer_latency(ms), total_latency(ms), 1-token_output_latency(ms), tokens/second")
 
   model.eval()
-  batch_exp = 7
+  batch_exp = 10
   
   for q, a in query_answer_length.items():
     for b in range(0, batch_exp):
