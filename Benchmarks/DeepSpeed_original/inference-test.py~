@@ -5,7 +5,6 @@ import math
 import os
 import torch
 import time
-import sys
 from utils import DSPipeline
 from deepspeed.runtime.utils import see_memory_usage
 
@@ -28,12 +27,9 @@ parser.add_argument("--test_performance", action='store_true', help="enable late
 parser.add_argument("--local_rank", type=int, default=0, help="local rank")
 args = parser.parse_args()
 
-'''
 def print_perf_stats(latency_set, config, warmup=3):
     # trim warmup queries
-
     latency_set = list(latency_set)
-    print (latency_set)
     latency_set = latency_set[warmup:]
     count = len(latency_set)
 
@@ -49,14 +45,11 @@ def print_perf_stats(latency_set, config, warmup=3):
         else:
             num_bytes = 1
         print("Avg Per Token Latency: {0:8.2f} ms".format(avg * 1000))
-        print("Tokens/Second: {0:10.0f}".format(1/avg))
         print("Avg BW: {0:8.2f} GB/s".format(1/avg * num_parameters * num_bytes / 1e9))
         print("Avg flops: {0:8.2f} TFlops/s".format(1/avg * num_parameters * num_bytes * args.batch_size / 1e12))
-'''
 
 world_size = int(os.getenv('WORLD_SIZE', '1'))
 local_rank = int(os.getenv('LOCAL_RANK', '0'))
-print("world_size: ", world_size, "local_rank: ", local_rank)
 
 data_type = getattr(torch, args.dtype)
 
@@ -90,7 +83,7 @@ if args.ds_inference:
 if local_rank == 0:
     see_memory_usage("after init_inference", True)
 
-'''
+
 input_sentences = [
          "DeepSpeed is a machine learning framework",
          "He is working on",
@@ -107,15 +100,22 @@ if args.batch_size > len(input_sentences):
     input_sentences *= math.ceil(args.batch_size / len(input_sentences))
 
 inputs = input_sentences[:args.batch_size]
-'''
-real_sentense = False
-input_sentence_template = ["GPUs play an important role in the delivery of the compute needed for deploying AI models, especially for large-scale pretrained models in computer vision, natural language processing, and multimodal learning. Currently, AI practitioners have very limited flexibility when choosing a high-performance GPU inference"]
-if (real_sentense == True):
-    if (args.batch_size > 1):
-        print("batch: ", args.batch_size)
-        input_sentence_template *= math.ceil(args.batch_size)
-else:
-    input_sentence_template = []
 
-    
-outputs = pipe(input_sentence_template, args)
+iters = 30 if args.test_performance else 2 #warmup
+times = []
+for i in range(iters):
+    torch.cuda.synchronize()
+    start = time.time()
+    outputs = pipe(inputs,
+            num_tokens=args.max_new_tokens,
+            do_sample=(not args.greedy))
+    torch.cuda.synchronize()
+    end = time.time()
+    times.append(end - start)
+print(f"generation time is {times[1]} sec")
+
+if args.local_rank == 0:
+    for i, o in zip(inputs, outputs):
+        print(f"\nin={i}\nout={o}\n{'-'*60}")
+    if args.test_performance:
+        print_perf_stats(map(lambda t: t / args.max_new_tokens, times), pipe.model.config)

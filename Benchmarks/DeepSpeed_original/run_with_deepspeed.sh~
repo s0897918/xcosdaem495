@@ -1,0 +1,1 @@
+deepspeed --num_gpus 1 inference-test.py --name "facebook/opt-1.3b" --test_performance --ds_inference

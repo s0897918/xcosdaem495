@@ -8,7 +8,6 @@ from pathlib import Path
 import json
 import deepspeed
 import torch
-import time
 from huggingface_hub import snapshot_download
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, LlamaTokenizerFast
 
@@ -26,7 +25,7 @@ class DSPipeline():
                  ):
         self.model_name = model_name
         self.dtype = dtype
-        print("device: ", device)
+
         if isinstance(device, torch.device):
             self.device = device
         elif isinstance(device, str):
@@ -37,7 +36,7 @@ class DSPipeline():
             self.device = torch.device(f"cuda:{device}")
 
         # the Deepspeed team made these so it's super fast to load (~1 minute), rather than wait 10-20min loading time.
-        #self.tp_presharded_models = ["microsoft/bloom-deepspeed-inference-int8", "microsoft/bloom-deepspeed-inference-fp16"]
+        self.tp_presharded_models = ["microsoft/bloom-deepspeed-inference-int8", "microsoft/bloom-deepspeed-inference-fp16"]
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, padding_side="left")
         self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -58,60 +57,16 @@ class DSPipeline():
             self.model.half()
 
 
-    def __call__(self, input_sentences, args):
-
-        if (len(input_sentences) >= 1):
-            input_ids = self.tokenizer.batch_encode_plus(input_sentences, return_tensors="pt", padding=True)
-            input_ids = input_ids["input_ids"]
-            input_ids = input_ids.to(self.device)
-            self.model.cuda().to(self.device)
-            outputs = self.model.generate(input_ids, temperature=0.9, do_sample=False, max_new_tokens=100, pad_token_id=self.tokenizer.eos_token_id)
-            outputs = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            print("outputs: ", outputs);
+    def __call__(self,
+                inputs=["test"],
+                num_tokens=100,
+                do_sample=False):
+        if isinstance(inputs, str):
+            input_list = [inputs]
         else:
-            q = 128
-            a = 32
-            batch_exp = 15
-            print("[INFO] model: " + args.name)
-            print("batch, query_length, answer_length, query_latency(ms), answer_latency(ms), total_latency(ms), 1-token_output_latency(ms), tokens/second")
-            self.model.cuda().to(self.device)
+            input_list = inputs
 
-            for b in range (0, batch_exp):
-                batch = 2**b
-                global_seed = torch.Generator()
-                input_ids = torch.randint(20, 5000, (batch, 128), generator=global_seed.manual_seed(1000))
-                input_ids = input_ids.to(self.device)
-                
-                # warm_up
-                outputs = self.model.generate(input_ids, temperature=0.9, do_sample=False, min_length=q+1, max_length=q+1, pad_token_id=self.tokenizer.eos_token_id)
-            
-                start = time.perf_counter()
-                outputs = self.model.generate(input_ids, temperature=0.9, do_sample=False, min_length=q+1, max_length=q+1, pad_token_id=self.tokenizer.eos_token_id)
-                torch.cuda.synchronize()
-                end = time.perf_counter() - start
-                query_latency = end
-            
-                start = time.perf_counter()
-                outputs = self.model.generate(input_ids, temperature=0.9, do_sample=False, min_length=q+a+1, max_length=q+a+1, pad_token_id=self.tokenizer.eos_token_id)
-                torch.cuda.synchronize()
-                end = time.perf_counter() - start
-                total_latency = end
-            
-                answer_lantency = total_latency - query_latency
-                token_output_latency = answer_lantency/a * 1000
-                tokens_per_second = (1000/token_output_latency)*batch
-
-                if (args.local_rank == 0):
-                    print(str(batch).rjust(len('batch')) + ", " +
-                          str(q).rjust(len('query_length')) + ", " +
-                          str(a).rjust(len('answer_length')) + ", " +
-                          "{:.0f}".format(query_latency * 1000).rjust(len('query_latency(ms)')) + ", " +
-                          "{:.0f}".format(answer_lantency * 1000).rjust(len('answer_latency(ms)')) +  ", " +
-                          "{:.0f}".format(total_latency * 1000).rjust(len('total_latency(ms)')) + ", " +
-                          "{:.0f}".format(token_output_latency).rjust(len('1-token_output_latency(ms)')) + ", " +
-                          "{:.0f}".format(tokens_per_second).rjust(len('tokens_second'))) 
-
-            
+        outputs = self.generate_outputs(input_list, num_tokens=num_tokens, do_sample=do_sample)
         return outputs
 
 
@@ -143,4 +98,25 @@ class DSPipeline():
         return repo_root, checkpoints_json
 
 
+    def generate_outputs(self,
+                         inputs=["test"],
+                         num_tokens=100,
+                         do_sample=False):
+        generate_kwargs = dict(max_new_tokens=num_tokens, do_sample=do_sample)
 
+        input_tokens = self.tokenizer.batch_encode_plus(inputs, return_tensors="pt", padding=True)
+        for t in input_tokens:
+            if torch.is_tensor(input_tokens[t]):
+                input_tokens[t] = input_tokens[t].to(self.device)
+
+        self.model.cuda().to(self.device)
+
+        if isinstance(self.tokenizer, LlamaTokenizerFast):
+            # NOTE: Check if Llamma can work w/ **input_tokens
+            #       'token_type_ids' kwarg not recognized in Llamma generate function
+            outputs = self.model.generate(input_tokens.input_ids, **generate_kwargs)
+        else:
+            outputs = self.model.generate(**input_tokens, **generate_kwargs)
+        outputs = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+
+        return outputs
