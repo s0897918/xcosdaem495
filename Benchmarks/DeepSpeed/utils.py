@@ -71,7 +71,7 @@ class DSPipeline():
         else:
             q = 128
             a = 32
-            batch_exp = 15
+            batch_exp = 10
             print("[INFO] model: " + args.name)
             print("batch, query_length, answer_length, query_latency(ms), answer_latency(ms), total_latency(ms), 1-token_output_latency(ms), tokens/second")
             self.model.cuda().to(self.device)

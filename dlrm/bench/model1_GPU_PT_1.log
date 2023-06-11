@@ -1,0 +1,50 @@
+Unable to import onnx.  No module named 'onnx'
+world size: 1, current rank: 0, local rank: 0
+Using 1 GPU(s)...
+input and target at random
+ln_emb:  [100 100]
+2 ln_emb.size:  2
+num_fea:  3
+DLRM_Net(
+  (emb_l): ModuleList(
+    (0): EmbeddingBag(100, 4, mode=sum)
+    (1): EmbeddingBag(100, 4, mode=sum)
+  )
+  (bot_l): Sequential(
+    (0): Linear(in_features=64, out_features=64, bias=True)
+    (1): ReLU()
+    (2): Linear(in_features=64, out_features=32, bias=True)
+    (3): ReLU()
+    (4): Linear(in_features=32, out_features=4, bias=True)
+    (5): ReLU()
+  )
+  (top_l): Sequential(
+    (0): Linear(in_features=7, out_features=128, bias=True)
+    (1): ReLU()
+    (2): Linear(in_features=128, out_features=64, bias=True)
+    (3): ReLU()
+    (4): Linear(in_features=64, out_features=32, bias=True)
+    (5): ReLU()
+    (6): Linear(in_features=32, out_features=1, bias=True)
+    (7): Sigmoid()
+  )
+  (loss_fn): MSELoss()
+)
+time/loss/accuracy (if enabled):
+./run_kaggle_pt
+Testing for inference only
+0
+1
+2
+3
+4
+5
+6
+7
+8
+9
+ accuracy 0.000 %, best 0.000 %
+time (sec):  188.94081699545495
+profiling
+profiling end
+1686279564.3104908
