@@ -830,11 +830,12 @@ def inference(
     mlp_bot_time = 0
     mlp_top_time = 0
 
-    print("batch size, mlp_bot(ms), mlp_top(ms), embedding(ms), ex_feature(ms), total(ms), parallel ratio(%)")
+    print("batch size, mlp_bot(ms), mlp_top(ms), embedding(ms), ex_feature(ms), loader(ms), total(ms), compute ratio(%), load ratio(%)")
     
     start_time = time.perf_counter()
     for i, testBatch in enumerate(test_ld):
 
+        load_time = time.perf_counter() - start_time
         #print(i)
         # early exit if nbatches was set by the user and was exceeded
         if nbatches > 0 and i >= nbatches:
@@ -1000,8 +1001,10 @@ def inference(
         "{:.0f}".format(mlp_top_time*1000).rjust(len('mlp_top(ms)')) + ", " +
         "{:.0f}".format(emb_time*1000).rjust(len('embedding(ms)')) + ", " +
         "{:.0f}".format(int_fea_time*1000).rjust(len('ex_feature(ms)')) + ", " +
+        "{:.0f}".format(load_time*1000).rjust(len('loader(ms)')) + ", " +
         "{:.0f}".format(total_time*1000).rjust(len('total(ms)')) + ", " +
-        "{:.0f}".format(100*((mlp_bot_time+mlp_top_time+emb_time+int_fea_time)/total_time)).rjust(len('parallel ratio(%)'))
+        "{:.0f}".format(100*((mlp_bot_time+mlp_top_time+emb_time+int_fea_time)/total_time)).rjust(len('compute ratio(%)')) + ", " +
+        "{:.0f}".format(100*((load_time)/total_time)).rjust(len('load ratio(%)'))
         
     )
     # print("time for mlp bot: {:.3f} ms".format(mlp_bot_time*1000))
