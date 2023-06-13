@@ -1,1 +1,1 @@
-deepspeed --num_gpus 1 inference-test.py --name "facebook/opt-6.7b" --test_performance --ds_inference
+deepspeed --num_gpus 2 inference-test.py --name "facebook/opt-350m" --test_performance --ds_inference

@@ -58,16 +58,57 @@ class DSPipeline():
             self.model.half()
 
 
-    def __call__(self, input_sentences, args):
+    def __call__(self, input_sentence_template, args):
 
-        if (len(input_sentences) >= 1):
-            input_ids = self.tokenizer.batch_encode_plus(input_sentences, return_tensors="pt", padding=True)
-            input_ids = input_ids["input_ids"]
-            input_ids = input_ids.to(self.device)
-            self.model.cuda().to(self.device)
-            outputs = self.model.generate(input_ids, temperature=0.9, do_sample=False, max_new_tokens=100, pad_token_id=self.tokenizer.eos_token_id)
-            outputs = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
-            print("outputs: ", outputs);
+        if (len(input_sentence_template) >= 1):
+
+            batch_exp = [1, 4, 16, 64, 128, 256]
+
+            print("[INFO] model: " + args.name)
+            print("batch, query_length, answer_length, query_to_ids_latency(ms), gen_answer_ids_latency(ms), ids_to_answer_latency(ms), total_latency(ms), 1-token_latency(ms), tokens/second")
+            
+            for b in batch_exp:
+                
+                batch = b
+                q = 8
+                a = 2048
+
+                input_sentences = batch * input_sentence_template
+
+                start = time.perf_counter()
+                input_ids = self.tokenizer(input_sentences, return_tensors="pt").input_ids
+                query_to_ids_latency = time.perf_counter() - start
+                
+                # print(input_ids)
+                start = time.perf_counter()
+                input_ids = input_ids.to(self.device)
+                self.model.cuda().to(self.device)
+                output_ids = self.model.generate(input_ids, do_sample=True, min_length=a, max_length=a)
+                torch.cuda.synchronize()
+                gen_answer_ids_latency = time.perf_counter() - start
+
+                
+                # print(output_ids)
+                start = time.perf_counter()
+                outputs = self.tokenizer.batch_decode(output_ids)
+                ids_to_answer_latency = time.perf_counter() - start
+
+                total_latency = query_to_ids_latency + gen_answer_ids_latency + ids_to_answer_latency
+                token_output_latency = total_latency/a * 1000
+                
+                tokens_per_second = (1000/token_output_latency)*batch
+
+                if (args.local_rank == 0):
+                    print(str(batch).rjust(len('batch')) + ", " +
+                          str(q).rjust(len('query_length')) + ", " +
+                          str(a).rjust(len('answer_length')) + ", " +
+                          "{:.0f}".format(query_to_ids_latency * 1000).rjust(len('query_to_ids_latency(ms)')) + ", " +
+                          "{:.0f}".format(gen_answer_ids_latency * 1000).rjust(len('gen_answer_ids_latency(ms)')) +  ", " +
+                          "{:.0f}".format(ids_to_answer_latency * 1000).rjust(len('ids_to_answer_latency(ms)')) +  ", " +
+                          "{:.0f}".format(total_latency * 1000).rjust(len('total_latency(ms)')) + ", " +
+                          "{:.0f}".format(token_output_latency).rjust(len('1-token_latency(ms)')) + ", " +
+                          "{:.0f}".format(tokens_per_second).rjust(len('tokens_second'))) 
+
         else:
             q = 128
             a = 32

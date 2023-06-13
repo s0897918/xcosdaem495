@@ -108,12 +108,13 @@ if args.batch_size > len(input_sentences):
 
 inputs = input_sentences[:args.batch_size]
 '''
-real_sentense = False
-input_sentence_template = ["GPUs play an important role in the delivery of the compute needed for deploying AI models, especially for large-scale pretrained models in computer vision, natural language processing, and multimodal learning. Currently, AI practitioners have very limited flexibility when choosing a high-performance GPU inference"]
+real_sentense = True
+#input_sentence_template = ["GPUs play an important role in the delivery of the compute needed for deploying AI models, especially for large-scale pretrained models in computer vision, natural language processing, and multimodal learning. Currently, AI practitioners have very limited flexibility when choosing a high-performance GPU inference"]
+input_sentence_template = ["Hello, I'm am conscious and"]
 if (real_sentense == True):
     if (args.batch_size > 1):
         print("batch: ", args.batch_size)
-        input_sentence_template *= math.ceil(args.batch_size)
+    #     input_sentence_template *= math.ceil(args.batch_size)
 else:
     input_sentence_template = []
 
