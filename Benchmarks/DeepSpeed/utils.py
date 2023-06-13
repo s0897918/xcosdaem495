@@ -62,7 +62,7 @@ class DSPipeline():
 
         if (len(input_sentence_template) >= 1):
 
-            batch_exp = [1, 4, 16, 64, 128, 256]
+            batch_exp = [1, 2, 4, 8, 16, 32, 64]
 
             print("[INFO] model: " + args.name)
             print("batch, query_length, answer_length, query_to_ids_latency(ms), gen_answer_ids_latency(ms), ids_to_answer_latency(ms), total_latency(ms), 1-token_latency(ms), tokens/second")
