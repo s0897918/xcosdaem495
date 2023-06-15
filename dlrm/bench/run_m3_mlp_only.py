@@ -1,0 +1,188 @@
+import os
+import torch
+import numpy as np
+import time
+import argparse
+import torch.nn as nn
+import sys
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--batch")
+parser.add_argument("--N")
+parser.add_argument("--D")
+parser.add_argument("--mlp_only", default=True)
+args = parser.parse_args()
+batch = int(args.batch)
+N = int(args.N)
+D = int(args.D)
+mlp_only = args.mlp_only
+iterations = 100
+print("batch: ", batch)
+print("N: ", N)
+print("D: ", D)
+print("mlp-only: ", mlp_only)
+
+
+if batch < 4097 :
+    iterations = 100
+
+if batch < 1025 :
+    iterations = 100
+
+#torch.backends.cuda.matmul.allow_tf32 = True
+torch.set_default_dtype(torch.float16)
+
+NumLayers = 33
+
+def create_mlp(D,N,NumLayers) :
+    layers = nn.ModuleList()
+    layers.append(nn.Linear(D, N, bias=True))
+    layers.append(nn.ReLU())
+    for i in range(NumLayers):
+        layers.append(nn.Linear(N, N, bias=True))
+        layers.append(nn.ReLU())
+    layers.append(nn.Linear(N, 1, bias=True))
+    layers.append(nn.Sigmoid())
+
+    return torch.nn.Sequential(*layers)
+
+print("create mlp start")
+model = create_mlp(D,N,NumLayers)
+print("create mlp end")
+#model = torch.ao.quantization.quantize_dynamic(
+#    model_fp32,  # the original model
+#    {nn.Linear, nn.ReLU},  # a set of layers to dynamically quantize
+#    dtype=torch.qint8)
+
+
+model.eval()
+model.to("cuda")
+#print(model)
+
+if not mlp_only:
+    print("Initialize EMB weights: ")
+    with torch.no_grad():
+        weight = torch.randn(size=(2**24,D))
+        embeddingbag = nn.EmbeddingBag.from_pretrained(weight).to("cuda")
+    print("Init ends")
+
+    
+        
+embedding_data = []
+emb_time = []
+data_transfer_time = []
+
+index_array = []
+data_index = []
+#for i in range(iterations):
+#    index_gen_start = time.time()
+#    data_index.append(torch.randint(0,2**24,size=(batch,26*900),device="cpu")) #, dtype=torch.int32)
+#    index_gen_end = time.time()
+#    index_array.append(index_gen_end-index_gen_start)
+
+if not mlp_only:
+    data_index_batch = torch.randint(0,2**24,size=(batch,26*900),device="cpu")
+else:    
+    data_index_batch = torch.randint(0,10,size=(batch,128),device="cpu", dtype=torch.float16)
+
+'''
+    data_transfer_start = time.time()
+    input_batch_index_tensor = data.to("cuda")
+    data_transfer_end = time.time()
+    embedding_batch = embeddingbag(input_batch_index_tensor) 
+    #del input_batch_index_tensor
+    embedding_data.append(embedding_batch)
+    #print(str(i) + " Emb : ", input_batch_index_tensor.size())
+    emb_lookup_end = time.time()
+    emb_time.append(emb_lookup_end-data_transfer_end)
+    data_transfer_time.append(data_transfer_end-data_transfer_start)
+'''
+
+#data = torch.randint(0,2**24,size=(batch,26*900), dtype=torch.int32)
+exec_array = []
+all_start = time.time()
+os.system("nvidia-smi dmon -s pucvmet > logs/async_35_fc_"+str(batch)+"x"+str(D)+"x"+str(N)+"_prof_embtable_mlp_float16.txt &")
+print("Run the model: ")
+with torch.no_grad():
+    for i in range(iterations) : #data_index_batch in data_index : 
+        data = data_index_batch #torch.randint(0,2**24,size=(batch,26*900), dtype=torch.int32)
+        data_start = time.time()
+        input_batch_index_tensor = data.to("cuda")
+        #print(input_batch_index_tensor)
+        data_end = time.time()
+        #embedding_batch = embeddingbag(input_batch_index_tensor)
+        #print(embedding_batch)
+        
+        exec_start = time.time()
+        #output = model(embedding_batch)
+        output = model(input_batch_index_tensor)
+        # print(output)
+        # sys.exit()
+        exec_end = time.time()
+        data_transfer_time.append(data_end-data_start)
+        #emb_time.append(exec_start-data_end)
+        exec_array.append(exec_end-exec_start)
+all_end = time.time()
+
+os.system("pkill -9 nvidia-smi")
+qps = (batch/np.mean(exec_array[10:]))
+ops_achieved = qps*((D*N+33*(N*N)+(N*1))*2)
+utilization = ops_achieved*100/(121*10**12)
+
+def profile(file_name):
+    f = open(file_name,"r")
+    prof_log = []
+    for line in f.readlines()[0:-3]:
+        line = line[0:-1] #remove \n
+        line = [l for l in line.split(" ") if l]
+        if "gpu" in line :
+            header = line[1:]
+        if "#" in line and "gpu" not in line :
+            metrics = line[1:]
+        if "#" not in line :
+            line.remove('-')
+            prof_log.append([int(l) for l in line])
+
+    header.remove('mtemp')
+    metrics.remove("C")
+    print("\nLength : ", len(prof_log))
+    mean_log = np.average(np.array(prof_log[3:]), axis=0)
+    mean_log_dict = {}
+    for k in range(len(mean_log)):
+        mean_log_dict[header[k]] = str(mean_log[k]) + " " + metrics[k]
+
+    print("Power           : ", mean_log_dict['pwr'])
+    print("SM Utilization  : ", mean_log_dict['sm'])
+    print("Mem Utilization : ", mean_log_dict['mem'])
+    f.close()
+
+print("\nEmbedded Dimenssion              : ",D)
+print("FC Units Dimenssion N            : ",N)
+print("Batch                            : ",batch)
+print("Output Size                      : ",output.size())
+print("Iterations                       : ",iterations)
+
+# print("\nEmbedding Bag Mode               : ",embeddingbag.mode.upper())
+# print("Embedding Data Type on GPU       : ", embedding_batch.type())
+# print("Embedding Input Shape            : ", embedding_batch.size())
+
+#print("\nData Index Generation Latency         : ",np.mean(index_array))
+#print("\nData Index Generation Throughput    : ",int(batch/np.mean(index_array)))
+
+print("\nPCIe Data Transfer Latency            : " ,np.mean(data_transfer_time[10:]))
+print("PCIe Data Transfer Throughput (QPS)   : " ,int(batch/np.mean(data_transfer_time[10:])))
+print("PCIe Data Transfer Rate (GB/sec)      : " ,batch*D*2/(np.mean(data_transfer_time[10:])*2**30))
+
+# print("\nEmbedding Lookup Lateny               : ", np.mean(emb_time[10:]))
+# print("\nEmbedding Lookup Throughput (QPS)   : ", int(batch/np.mean(emb_time[10:])))
+
+print("\nCompute Latency                  : ",np.mean(exec_array[10:]))
+print("Compute QPS                      : ",int(qps))
+print("Compute OPS Achieved             : ", int(ops_achieved))
+print("\nCompute Utilization (%)          : ", utilization)
+
+print("\nTotal Inference Processing Time (sec) : ", all_end - all_start)
+
+#profile("logs/async_35_fc_"+str(batch)+"x"+str(D)+"x"+str(N)+"_prof_embtable_mlp_float16.txt")
+
+print("\n***********************************************\n")
