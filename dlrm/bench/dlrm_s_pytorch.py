@@ -118,7 +118,11 @@ def time_wrap(use_gpu):
 
 
 def dlrm_wrap(X, lS_o, lS_i, use_gpu, device, ndevices=1):
+    print("dlrm_warp: ")
+    print("ls_o: ", lS_o)
+    print("ls_i: ", lS_i)
     with record_function("DLRM forward"):
+        print("under DLRM forward: ")
         if use_gpu:  # .cuda()
             # lS_i can be either a list of tensors or a stacked tensor.
             # Handle each case below:
@@ -133,6 +137,7 @@ def dlrm_wrap(X, lS_o, lS_i, use_gpu, device, ndevices=1):
                     if isinstance(lS_o, list)
                     else lS_o.to(device)
                 )
+        print("before dlrm: ")        
         return dlrm(X.to(device), lS_o, lS_i)
 
 
@@ -202,9 +207,46 @@ la5_time = 0
 mlp_flag = "top"
 ### define dlrm in PyTorch ###
 class DLRM_Net(nn.Module):
+    def create_m3_bot_mlp(self):
+
+        layers = nn.ModuleList()
+        ln=35
+        self.inputNN = 128
+        self.outputNN = 128
+
+        for i in range(0, ln):
+            if i == 0:
+                n = self.inputNN
+                m = 6144
+            elif i == ln-1:
+                n = 6144
+                m = self.outputNN
+            else:
+                n = 6144
+                m = 6144
+
+            LL = nn.Linear(int(n), int(m), bias=True)
+            # initialize the weights
+            # with torch.no_grad():
+            # custom Xavier input, output or two-sided fill
+            mean = 0.0  # std_dev = np.sqrt(variance)
+            std_dev = np.sqrt(2 / (m + n))  # np.sqrt(1 / m) # np.sqrt(1 / n)
+            W = np.random.normal(mean, std_dev, size=(m, n)).astype(np.float32)
+            std_dev = np.sqrt(1 / m)  # np.sqrt(2 / (m + 1))
+            bt = np.random.normal(mean, std_dev, size=m).astype(np.float32)
+            # approach 1
+            LL.weight.data = torch.tensor(W, requires_grad=True)
+            LL.bias.data = torch.tensor(bt, requires_grad=True)
+            layers.append(LL)
+            layers.append(nn.ReLU())
+
+        return torch.nn.Sequential(*layers)
+
     def create_mlp(self, ln, sigmoid_layer):
         # build MLP layer by layer
+
         layers = nn.ModuleList()
+        print("ln size:", ln.size)
         for i in range(0, ln.size - 1):
             n = ln[i]
             m = ln[i + 1]
@@ -374,8 +416,19 @@ class DLRM_Net(nn.Module):
                         self.v_W_l.append(Parameter(w))
                 else:
                     self.v_W_l = w_list
-            self.bot_l = self.create_mlp(ln_bot, sigmoid_bot)
-            self.top_l = self.create_mlp(ln_top, sigmoid_top)
+
+            # print("ln_bot, ln_top: ", ln_bot, ln_top)
+            if args.arch_m3_bot_mlp:
+                self.bot_l = self.create_m3_bot_mlp()
+            else:    
+                self.bot_l = self.create_mlp(ln_bot, sigmoid_bot)
+
+
+            if args.arch_m3_bot_mlp:
+                self.top_l = self.create_m3_top_mlp()
+            else:
+                self.top_l = self.create_mlp(ln_top, sigmoid_top)
+                
 
             # quantization
             self.quantize_emb = False
@@ -441,7 +494,8 @@ class DLRM_Net(nn.Module):
         # print("apply_emb")
         for k, sparse_index_group_batch in enumerate(lS_i):
             sparse_offset_group_batch = lS_o[k]
-
+            print("sparse_offset_group_batch: ", sparse_offset_group_batch)
+            print("sparse_index_group_batch: ", sparse_index_group_batch)
             # embedding lookup
             # We are using EmbeddingBag, which implicitly uses sum operator.
             # The embeddings are represented as tall matrices, with sum
@@ -553,6 +607,7 @@ class DLRM_Net(nn.Module):
         return R
 
     def forward(self, dense_x, lS_o, lS_i):
+        print("ndevices in forward:", self.ndevices)
         if ext_dist.my_size > 1:
             # multi-node multi-device run
             return self.distributed_forward(dense_x, lS_o, lS_i)
@@ -655,7 +710,7 @@ class DLRM_Net(nn.Module):
         return z
 
     def parallel_forward(self, dense_x, lS_o, lS_i):
-
+        print("parallel forward: ")
         ### prepare model (overwrite) ###
         # WARNING: # of devices must be >= batch size in parallel_forward call
         batch_size = dense_x.size()[0]
@@ -697,7 +752,9 @@ class DLRM_Net(nn.Module):
         ### prepare input (overwrite) ###
         # scatter dense features (data parallelism)
         # print(dense_x.device)
+        # print("before scatter: ", dense_x)
         dense_x = scatter(dense_x, device_ids, dim=0)
+        # print("after scatter: ", dense_x)
         # distribute sparse features (model parallelism)
         if (len(self.emb_l) != len(lS_o)) or (len(self.emb_l) != len(lS_i)):
             sys.exit("ERROR: corrupted model input detected in parallel_forward call")
@@ -742,9 +799,11 @@ class DLRM_Net(nn.Module):
         for k, _ in enumerate(self.emb_l):
             d = torch.device("cuda:" + str(k % ndevices))
             y = scatter(ly[k], device_ids, dim=0)
+            #print("y: ", y)
             t_list.append(y)
         # adjust the list to be ordered per device
         ly = list(map(lambda y: list(y), zip(*t_list)))
+        # print("ly: ", ly)
         # debug prints
         # print(ly)
 
@@ -753,6 +812,10 @@ class DLRM_Net(nn.Module):
         for k in range(ndevices):
             # print(k)
             zk = self.interact_features(x[k], ly[k])
+            # if k==0:
+            #     print("xk: ",x[k])
+            #     print("lyk: ", ly[k])
+            #     print("zk: ", zk)
             z.append(zk)
         # debug prints
         # print(z)
@@ -857,7 +920,7 @@ def inference(
         # forward pass
         # la_start = time.perf_counter()
 
-        # print("forward start-> ndevice: ", ndevices)
+        print("forward start-> ndevice: ", ndevices)
         Z_test = dlrm_wrap(
             X_test,
             lS_o_test,
@@ -1078,6 +1141,10 @@ def run():
     parser.add_argument("--num-indices-per-lookup-fixed", type=bool, default=False)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--memory-map", action="store_true", default=False)
+    # m3
+    parser.add_argument("--arch-m3-bot-mlp", type=bool, default=True)
+    parser.add_argument("--arch-m3-top-mlp", type=bool, default=True)
+
     # training
     parser.add_argument("--mini-batch-size", type=int, default=1)
     parser.add_argument("--nepochs", type=int, default=1)
@@ -1142,7 +1209,7 @@ def run():
     global nbatches_test
     global writer
     args = parser.parse_args()
-
+    # print("m3: ", args.arch_mlp_m3)
     if args.dataset_multiprocessing:
         assert float(sys.version[:3]) > 3.7, (
             "The dataset_multiprocessing "
@@ -1390,6 +1457,7 @@ def run():
             print(T.detach().cpu())
 
     global ndevices
+    print("ngpus, min_batch_size, numfea-1: ", ngpus,args.mini_batch_size, num_fea-1)
     ndevices = min(ngpus, args.mini_batch_size, num_fea - 1) if use_gpu else -1
 
     ### construct the neural network specified above ###
@@ -1397,6 +1465,8 @@ def run():
     # the weights wse need to start from the same random seed.
     # np.random.seed(args.numpy_rand_seed)
     global dlrm
+    print("ln_emb, ln_bot, ln_top: ", ln_emb, ln_bot, ln_top)
+
     dlrm = DLRM_Net(
         m_spa,
         ln_emb,

@@ -1,0 +1,20 @@
+import torch.nn as nn
+from thop import profile
+
+class NN(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.l1 = nn.Linear(10, 10)
+        self.l2 = nn.Linear(10, 10)
+
+    def forward(self, x):
+        y1 = self.l1(x)
+        y2 = self.l2(x)
+        y3 = y1 + y2
+        return y2 + y2 + y3*y1
+
+model = NN()
+x = torch.empty(16, 10)
+macs, params = profile(model, inputs=(x,))
+print(macs)
+print(params)

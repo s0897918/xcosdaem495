@@ -12,8 +12,8 @@ else
 fi
 #echo $dlrm_extra_option
 
-cpu=1
-gpu=0
+cpu=0
+gpu=1
 pt=1
 c2=0
 
@@ -21,7 +21,7 @@ ncores=1 #12 #6
 nsockets="0"
 
 #ngpus="1 2 4 8"
-ngpus="1"
+ngpus="2"
 
 numa_cmd="numactl --physcpubind=0-$((ncores-1)) -m $nsockets" #run on one socket, without HT
 dlrm_pt_bin="python dlrm_s_pytorch.py"
@@ -34,14 +34,19 @@ rand_seed=727
 c2_net="async_scheduling"
 
 #Model param
-mb_size=1 #1024 #512 #256
+#mini_batch_size
+mb_size=4 #1024 #512 #256
 nbatches=1 #500 #100
-bot_mlp="4096-4096-4096-4096-128" #"512-512-64"
+bot_mlp="128" #"512-512-64"
+
+arch_m3_bot_mlp=True
+arch_m3_top_mlp=True
+
 top_mlp="4096-4096-4096-1" #"1024-1024-1024-1"
 emb_size=128
 nindices=100
 
-emb="1000000-1000000-1000000-1000000-1000000-1000000-1000000-1000000"
+emb="4-4"
 #emb="1460-583-10131227-2202608-305-24-12517-633-3-93145-5683-8351593-3194-27-14992-5461306-10-5652-2173-4-7046547-18-15-286181-105-142572"
 interaction="dot"
 tnworkers=0
@@ -49,6 +54,8 @@ tmb_size=16384
 
 _args="--mini-batch-size="${mb_size}\
 " --num-batches="${nbatches}\
+" --arch-m3-bot-mlp="${arch_m3_bot_mlp}\
+" --arch-m3-top-mlp="${arch_m3_top_mlp}\
 " --data-generation="${data}\
 " --arch-mlp-bot="${bot_mlp}\
 " --arch-mlp-top="${top_mlp}\
