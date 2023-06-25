@@ -1240,7 +1240,7 @@ def run():
     parser.add_argument("--memory-map", action="store_true", default=False)
     # m3
     parser.add_argument("--debug-m3", action="store_true", default=False)
-    parser.add_argument("--debug-m3-no", action="store_true", default=False)
+    parser.add_argument("--debug-m3-", action="store_true", default=False)
     
     parser.add_argument("--use-m3-bot-mlp", action="store_true", default=False)
     parser.add_argument("--use-m3-top-mlp", action="store_true", default=False)
@@ -1640,7 +1640,7 @@ def run():
     )
     if args.debug_m3:
         print(dlrm)
-        
+        dddd
     # test prints
     if args.debug_mode:
         print("initial parameters (weights and bias):")

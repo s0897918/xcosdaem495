@@ -12,8 +12,8 @@ else
 fi
 #echo $dlrm_extra_option
 
-cpu=0
-gpu=1
+cpu=1
+gpu=0
 pt=1
 c2=0
 
@@ -35,27 +35,29 @@ c2_net="async_scheduling"
 
 #Model param
 #mini_batch_size
-mb_size=4 #1024 #512 #256
+mb_size=2048 #1024 #512 #256
 nbatches=1 #500 #100
 bot_mlp="128" #"512-512-64"
 
-arch_m3_bot_mlp=True
-arch_m3_top_mlp=True
+#m3
+arch_m3_mlp_lys=10 #35
+arch_m3_emb_tbs=4
+arch_m3_emb_size=4
 
 top_mlp="4096-4096-4096-1" #"1024-1024-1024-1"
 emb_size=128
 nindices=100
 
-emb="4-4"
-#emb="1460-583-10131227-2202608-305-24-12517-633-3-93145-5683-8351593-3194-27-14992-5461306-10-5652-2173-4-7046547-18-15-286181-105-142572"
+emb="16-16"
 interaction="dot"
 tnworkers=0
 tmb_size=16384
 
 _args="--mini-batch-size="${mb_size}\
 " --num-batches="${nbatches}\
-" --arch-m3-bot-mlp="${arch_m3_bot_mlp}\
-" --arch-m3-top-mlp="${arch_m3_top_mlp}\
+" --use-m3-bot-mlp --use-m3-top-mlp --arch-m3-mlp-lys="${arch_m3_mlp_lys}\
+" --use-m3-emb --arch-m3-emb-tbs="${arch_m3_emb_tbs}\
+" --arch-m3-emb-size="${arch_m3_emb_size}\
 " --data-generation="${data}\
 " --arch-mlp-bot="${bot_mlp}\
 " --arch-mlp-top="${top_mlp}\
@@ -140,7 +142,7 @@ if [ $gpu = 1 ]; then
       echo $cmd
       eval $cmd
       #min=$(grep "iteration" $outf | awk 'BEGIN{best=999999} {if (best > $7) best=$7} END{print best}')
-      echo "Min time per iteration = $min"
+      #echo "Min time per iteration = $min"
       # move profiling file(s)
       #mv $outp ${outf//".log"/".prof"}
       #mv ${outp//".prof"/".json"} ${outf//".log"/".json"}
