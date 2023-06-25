@@ -731,8 +731,10 @@ class DLRM_Net(nn.Module):
         global op_fea_time
         
         start_time = time.perf_counter()
+        print("dense_x: ", dense_x)
 
         x = self.apply_mlp(dense_x, self.bot_l)
+        print("x:", x)
 
         mlp_bot_time += (time.perf_counter() - start_time)
 
@@ -746,6 +748,7 @@ class DLRM_Net(nn.Module):
         
         ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l)
 
+        #print("ly:", ly)
         emb_time += (time.perf_counter() - start_time)
         
         # for y in ly:
@@ -766,9 +769,9 @@ class DLRM_Net(nn.Module):
         
         p = self.apply_mlp(z, self.top_l)
 
-        if args.debug_m3:
-            print("p: ", p)
-            
+        # if args.debug_m3:
+        #     print("p: ", p[0])
+        #print("p:", p)    
         mlp_top_time += (time.perf_counter() - start_time)
         
         # clamp output if needed
@@ -777,6 +780,7 @@ class DLRM_Net(nn.Module):
         else:
             z = p
 
+        print("z:",z)    
         return z
 
     def parallel_forward(self, dense_x, lS_o, lS_i):
@@ -827,9 +831,11 @@ class DLRM_Net(nn.Module):
         ### prepare input (overwrite) ###
         # scatter dense features (data parallelism)
         # print(dense_x.device)
-        # print("before scatter: ", dense_x)
+        print("device_ids: ",device_ids)
+        print("before scatter: ", dense_x)
         dense_x = scatter(dense_x, device_ids, dim=0)
-        # print("after scatter: ", dense_x)
+        print("after scatter: ", dense_x)
+        sys.exit()
         # distribute sparse features (model parallelism)
         if (len(self.emb_l) != len(lS_o)) or (len(self.emb_l) != len(lS_i)):
             sys.exit("ERROR: corrupted model input detected in parallel_forward call")
@@ -853,13 +859,13 @@ class DLRM_Net(nn.Module):
         # mlp_flag = "bot"
         # print("parallel_apply for bot mlp->device_ids: ", device_ids)
         start_time = time.perf_counter()
-        
+        print("dense_x: ", dense_x)
         x = parallel_apply(self.bot_l_replicas, dense_x, None, device_ids)
 
         mlp_bot_time += (time.perf_counter() - start_time)
         
         # debug prints
-        # print(x)
+        print("x:", x)
 
         # embeddings
         start_time = time.perf_counter()
@@ -869,7 +875,7 @@ class DLRM_Net(nn.Module):
         emb_time += (time.perf_counter() - start_time)
         
         # debug prints
-        # print(ly)
+        # print("ly:", ly)
 
         # butterfly shuffle (implemented inefficiently for now)
         # WARNING: Note that at this point we have the result of the embedding lookup
@@ -920,11 +926,12 @@ class DLRM_Net(nn.Module):
         
         p = parallel_apply(self.top_l_replicas, z, None, device_ids)
 
+        #print("p:",p)
         mlp_top_time += (time.perf_counter() - start_time)
 
         ### gather the distributed results ###
         p0 = gather(p, self.output_d, dim=0)
-
+        #print("p0:", p0)
         # clamp output if needed
         if 0.0 < self.loss_threshold and self.loss_threshold < 1.0:
             z0 = torch.clamp(
@@ -933,6 +940,7 @@ class DLRM_Net(nn.Module):
         else:
             z0 = p0
 
+        print("z0:",z0)    
         return z0
 
 
@@ -995,7 +1003,7 @@ def inference(
     for i, testBatch in enumerate(test_ld):
 
         #load_time = time.perf_counter() - start_time
-        #print(i)
+        # print(i)
         # early exit if nbatches was set by the user and was exceeded
         if nbatches > 0 and i >= nbatches:
             break
@@ -1005,6 +1013,9 @@ def inference(
         X_test, lS_o_test, lS_i_test, T_test, W_test, CBPP_test = unpack_batch(
             testBatch
         )
+
+        # print("ls_o:", lS_o_test, len(lS_o_test[0]))
+        # print("ls_i:", lS_i_test, len(lS_i_test[0]))
         # la_end = time.perf_counter()
         # la4_time += (la_end - la_start)
 
@@ -1154,19 +1165,20 @@ def inference(
         
     total_inference_time = time.perf_counter() - start_time
     print("Inference time used: {:.2f} (ms)".format(1000*total_inference_time))
-    print("batch size, mini batch size, mlp_bot(ms), mlp_top(ms), embedding(ms), op_feature(ms), total(ms), compute ratio(%)")
+
+    if not use_gpu:
+        print("batch size, mini batch size, mlp_bot(ms), mlp_top(ms), embedding(ms), op_feature(ms), total(ms), compute ratio(%)")
     
-    print(
-        str(args.num_batches).rjust(len('batch_size')) + ", " +
-        str(args.mini_batch_size).rjust(len('mini_batch_size')) + ", " +        
-        "{:.2f}".format(mlp_bot_time*1000).rjust(len('mlp_bot(ms)')) + ", " +
-        "{:.2f}".format(mlp_top_time*1000).rjust(len('mlp_top(ms)')) + ", " +
-        "{:.2f}".format(emb_time*1000).rjust(len('embedding(ms)')) + ", " +
-        "{:.2f}".format(op_fea_time*1000).rjust(len('op_feature(ms)')) + ", " +
-        "{:.2f}".format(total_inference_time*1000).rjust(len('total(ms)')) + ", " +
-        "{:.2f}".format(100*((mlp_bot_time+mlp_top_time+emb_time+op_fea_time)/total_inference_time)).rjust(len('compute ratio(%)'))
-        
-    )
+        print(
+            str(args.num_batches).rjust(len('batch_size')) + ", " +
+            str(args.mini_batch_size).rjust(len('mini_batch_size')) + ", " +        
+            "{:.2f}".format(mlp_bot_time*1000).rjust(len('mlp_bot(ms)')) + ", " +
+            "{:.2f}".format(mlp_top_time*1000).rjust(len('mlp_top(ms)')) + ", " +
+            "{:.2f}".format(emb_time*1000).rjust(len('embedding(ms)')) + ", " +
+            "{:.2f}".format(op_fea_time*1000).rjust(len('op_feature(ms)')) + ", " +
+            "{:.2f}".format(total_inference_time*1000).rjust(len('total(ms)')) + ", " +
+            "{:.2f}".format(100*((mlp_bot_time+mlp_top_time+emb_time+op_fea_time)/total_inference_time)).rjust(len('compute ratio(%)'))
+        )
     # print("time for mlp bot: {:.3f} ms".format(mlp_bot_time*1000))
     # print("time for mlp top: {:.3f} ms".format(mlp_top_time*1000))
     # print("time for int fea: {:.3f} ms".format(int_fea_time*1000))

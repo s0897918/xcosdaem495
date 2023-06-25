@@ -1,14 +1,14 @@
 #!/bin/bash
 
 
-mb_size=64 
+mb_size=2
 nbatches=1 
 
 
 #M3 setup
-arch_m3_mlp_lys=35
-arch_m3_emb_tbs=1800
-arch_m3_emb_size=8192
+arch_m3_mlp_lys=3
+arch_m3_emb_tbs=2
+arch_m3_emb_size=4
 
 # Don't change the following setup
 ncores=1 
@@ -17,7 +17,6 @@ numa_cmd="numactl --physcpubind=0-$((ncores-1)) -m $nsockets" #run on one socket
 dlrm_pt_bin="python dlrm_s_pytorch.py"
 print_freq=100
 rand_seed=727
-
 emb_size=128
 nindices=100
 interaction="dot"
