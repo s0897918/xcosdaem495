@@ -240,7 +240,7 @@ class DLRM_Net(nn.Module):
         # build MLP layer by layer
         print("Start to create a mlp: ")
         start_time = time.perf_counter()
-        
+        np.random.seed(1000)
         layers = nn.ModuleList()
         # print("ln size:", ln.size)
         for i in range(0, ln.size - 1):
@@ -255,7 +255,12 @@ class DLRM_Net(nn.Module):
             # custom Xavier input, output or two-sided fill
             mean = 0.0  # std_dev = np.sqrt(variance)
             std_dev = np.sqrt(2 / (m + n))  # np.sqrt(1 / m) # np.sqrt(1 / n)
+            #print("np rand seed:", np.random.get_state()[1][0])
+
             W = np.random.normal(mean, std_dev, size=(m, n)).astype(np.float32)
+
+            #print("W:", W)
+            #sys.exit()
             std_dev = np.sqrt(1 / m)  # np.sqrt(2 / (m + 1))
             bt = np.random.normal(mean, std_dev, size=m).astype(np.float32)
             # approach 1
@@ -311,9 +316,11 @@ class DLRM_Net(nn.Module):
         # print("m, ln: ",m,ln)
         print("Start to create a emb: ")
         start_time = time.perf_counter()
-        
+        #print("np rand seed for emb:", np.random.get_state()[1][0])
+
         emb_l = nn.ModuleList()
         v_W_l = []
+        np.random.seed(100)
         for i in range(0, ln.size):
             if ext_dist.my_size > 1:
                 if i not in self.local_emb_indices:
@@ -362,7 +369,8 @@ class DLRM_Net(nn.Module):
 
         create_emb_time = time.perf_counter() - start_time
         print("The time used: {:.2f} (ms)".format(create_emb_time*1000))
-
+        #print("np rand seed after emb:", np.random.get_state()[1][0])
+        #print("emb:",emb_l[0].state_dict())
         return emb_l, v_W_l
 
     def __init__(
@@ -399,6 +407,9 @@ class DLRM_Net(nn.Module):
         ):
             # print("cling")
             # sys.exit()
+
+            print("np rand seed:", np.random.get_state()[1][0])
+
             # save arguments
             self.ndevices = ndevices
             self.output_d = 0
@@ -441,6 +452,8 @@ class DLRM_Net(nn.Module):
                 self.local_emb_slice = ext_dist.get_my_slice(n_emb)
                 self.local_emb_indices = list(range(n_emb))[self.local_emb_slice]
 
+            print("np rand seed:", np.random.get_state()[1][0])
+
             # create operators
             if ndevices <= 1:
                 # if args.arch_m3_emb:
@@ -458,6 +471,8 @@ class DLRM_Net(nn.Module):
                 else:
                     self.v_W_l = w_list
 
+            print("np rand seed:", np.random.get_state()[1][0])
+                    
             # print("ln_bot, ln_top: ", ln_bot, ln_top)
             # if args.arch_m3_bot_mlp:
             #     self.bot_l = self.create_m3_mlp(args.arch_m3_mlp_lys, 128, 128)
@@ -731,10 +746,11 @@ class DLRM_Net(nn.Module):
         global op_fea_time
         
         start_time = time.perf_counter()
-        print("dense_x: ", dense_x)
+        # print("dense_x: ", dense_x)
+        #print("bot: ", self.bot_l[0].weight)
 
         x = self.apply_mlp(dense_x, self.bot_l)
-        print("x:", x)
+        #print("x:", x)
 
         mlp_bot_time += (time.perf_counter() - start_time)
 
@@ -803,10 +819,19 @@ class DLRM_Net(nn.Module):
             self.parallel_model_is_not_prepared = True
 
         if self.parallel_model_is_not_prepared or self.sync_dense_params:
+            #print("init replicas: ", device_ids)
             # replicate mlp (data parallelism)
+            
             self.bot_l_replicas = replicate(self.bot_l, device_ids)
+            # print("bot_l:", self.bot_l)
+            #print("bot_l: ", self.bot_l[0].weight)
+            # print("bot_l_rep_0: ", self.bot_l_replicas[0][0].weight)
+            # print("bot_l_rep_1: ", self.bot_l_replicas[1][0].weight)
+
+            
             self.top_l_replicas = replicate(self.top_l, device_ids)
             self.parallel_model_batch_size = batch_size
+            # sys.exit()          
 
         if self.parallel_model_is_not_prepared:
             # distribute embeddings (model parallelism)
@@ -831,11 +856,11 @@ class DLRM_Net(nn.Module):
         ### prepare input (overwrite) ###
         # scatter dense features (data parallelism)
         # print(dense_x.device)
-        print("device_ids: ",device_ids)
-        print("before scatter: ", dense_x)
+        # print("device_ids: ",device_ids)
+        # print("before scatter: ", dense_x)
         dense_x = scatter(dense_x, device_ids, dim=0)
-        print("after scatter: ", dense_x)
-        sys.exit()
+        # print("after scatter: ", dense_x)
+
         # distribute sparse features (model parallelism)
         if (len(self.emb_l) != len(lS_o)) or (len(self.emb_l) != len(lS_i)):
             sys.exit("ERROR: corrupted model input detected in parallel_forward call")
@@ -859,14 +884,16 @@ class DLRM_Net(nn.Module):
         # mlp_flag = "bot"
         # print("parallel_apply for bot mlp->device_ids: ", device_ids)
         start_time = time.perf_counter()
-        print("dense_x: ", dense_x)
+        #print("dense_x: ", dense_x)
+        #print("bot: ", self.bot_l_replicas[0][0].state_dict())
+        
         x = parallel_apply(self.bot_l_replicas, dense_x, None, device_ids)
 
         mlp_bot_time += (time.perf_counter() - start_time)
         
         # debug prints
-        print("x:", x)
-
+        #print("x:", x)
+        #sys.exit()
         # embeddings
         start_time = time.perf_counter()
         
@@ -1360,6 +1387,8 @@ def run():
 
     ### some basic setup ###
     np.random.seed(args.numpy_rand_seed)
+    print("np rand seed:", np.random.get_state()[1][0])
+    
     np.set_printoptions(precision=args.print_precision)
     torch.set_printoptions(precision=args.print_precision)
     torch.manual_seed(args.numpy_rand_seed)
@@ -1391,6 +1420,7 @@ def run():
     else:
         device = torch.device("cpu")
         print("Using CPU...")
+
 
     ### prepare training data ###
     ln_bot = np.fromstring(args.arch_mlp_bot, dtype=int, sep="-")
@@ -1622,7 +1652,10 @@ def run():
     ### construct the neural network specified above ###
     # WARNING: to obtain exactly the same initialization for
     # the weights wse need to start from the same random seed.
-    # np.random.seed(args.numpy_rand_seed)
+    np.random.seed(args.numpy_rand_seed)
+
+    print("np rand seed:", np.random.get_state()[1][0])
+    
     global dlrm
     print("ln_emb shape: ", ln_emb)
     print("ln_bot shape: ", ln_bot)
