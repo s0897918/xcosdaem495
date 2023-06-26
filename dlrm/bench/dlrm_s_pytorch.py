@@ -195,10 +195,18 @@ class LRPolicyScheduler(_LRScheduler):
                 lr = self.base_lrs
         return lr
 
-mlp_bot_time = 0
-mlp_top_time = 0
-op_fea_time = 0
-emb_time = 0
+cling_bench_all = {'bot_time':[],
+                   'top_time':[],
+                   'ops_time':[],
+                   'emb_time':[],
+                   'per_batch_time':[],
+                   'rep_mlp_time':[],
+                   'dis_emb_time':[],
+                   'dis_den_time':[],
+                   'dis_spa_time':[],
+                   'sca_emb_time':[],
+                   'p_gather_time':[],
+                   'prob':[]}    
 
 ### define dlrm in PyTorch ###
 class DLRM_Net(nn.Module):
@@ -408,7 +416,7 @@ class DLRM_Net(nn.Module):
             # print("cling")
             # sys.exit()
 
-            print("np rand seed:", np.random.get_state()[1][0])
+            
 
             # save arguments
             self.ndevices = ndevices
@@ -452,7 +460,7 @@ class DLRM_Net(nn.Module):
                 self.local_emb_slice = ext_dist.get_my_slice(n_emb)
                 self.local_emb_indices = list(range(n_emb))[self.local_emb_slice]
 
-            print("np rand seed:", np.random.get_state()[1][0])
+
 
             # create operators
             if ndevices <= 1:
@@ -471,7 +479,7 @@ class DLRM_Net(nn.Module):
                 else:
                     self.v_W_l = w_list
 
-            print("np rand seed:", np.random.get_state()[1][0])
+
                     
             # print("ln_bot, ln_top: ", ln_bot, ln_top)
             # if args.arch_m3_bot_mlp:
@@ -508,31 +516,7 @@ class DLRM_Net(nn.Module):
             # sys.exit()
 
     def apply_mlp(self, x, layers):
-
-        # approach 1: use ModuleList
-        # for layer in layers:
-        #     x = layer(x)
-        # return x
-        # approach 2: use Sequential container to wrap all layers
-        # global mlp_top_time
-        # global mlp_bot_time
-        # global mlp_flag
-
-        # start_time = time.perf_counter()
-        
         r = layers(x)
-
-        # end_time = time.perf_counter()
-        # mlp_time += (end_time - start_time)
-        # if (mlp_flag == "top"):
-        #     print("apply mlp top")
-        #     mlp_top_time += (end_time - start_time)
-        # else:
-        #     print("apply mlp bot")
-        #     mlp_bot_time += (end_time - start_time) 
-            
-        # print("time for mlp in seconds: ", mlp_time)
-        
         return r
 
     def apply_emb(self, lS_o, lS_i, emb_l, v_W_l):
@@ -736,102 +720,123 @@ class DLRM_Net(nn.Module):
 
     def sequential_forward(self, dense_x, lS_o, lS_i):
         print("Using sequential forward:")
-        # process dense features (using bottom mlp), resulting in a row vector
-        # global mlp_flag
-        # mlp_flag = "bot"
 
-        global mlp_top_time
-        global mlp_bot_time
-        global emb_time
-        global op_fea_time
+        global cling_bench_all
+
+        if args.use_gpu:
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
         
-        start_time = time.perf_counter()
-        # print("dense_x: ", dense_x)
-        #print("bot: ", self.bot_l[0].weight)
+            start.record()
+            x = self.apply_mlp(dense_x, self.bot_l)
+            end.record()
+            torch.cuda.synchronize()
 
-        x = self.apply_mlp(dense_x, self.bot_l)
-        #print("x:", x)
+            cling_bench_all['bot_time'].append(start.elapsed_time(end))
 
-        mlp_bot_time += (time.perf_counter() - start_time)
+            start.record()
+            ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l)
+            end.record()
+            torch.cuda.synchronize()
 
-        # debug prints
-        # print("intermediate")
-        # print(x.detach().cpu().numpy())
+            cling_bench_all['emb_time'].append(start.elapsed_time(end))
+            
 
-        # process sparse features(using embeddings), resulting in a list of row vectors
-        # print("lS_o, lS_i: ", lS_o, lS_i)
-        start_time = time.perf_counter()
+            start.record()
         
-        ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l)
+            z = self.interact_features(x, ly)
+            end.record()
+            torch.cuda.synchronize()
 
-        #print("ly:", ly)
-        emb_time += (time.perf_counter() - start_time)
-        
-        # for y in ly:
-        #     print(y.detach().cpu().numpy())
+            cling_bench_all['ops_time'].append(start.elapsed_time(end))
 
-        # interact features (dense and sparse)
-        start_time = time.perf_counter()
-        
-        z = self.interact_features(x, ly)
 
-        op_fea_time += (time.perf_counter() - start_time)
 
-        # print(z.detach().cpu().numpy())
+            start.record()
+            p = self.apply_mlp(z, self.top_l)
+            end.record()
+            torch.cuda.synchronize()
 
-        # obtain probability of a click (using top mlp)
-        # mlp_flag = "top"
-        start_time = time.perf_counter()
-        
-        p = self.apply_mlp(z, self.top_l)
+            cling_bench_all['top_time'].append(start.elapsed_time(end))
 
-        # if args.debug_m3:
-        #     print("p: ", p[0])
-        #print("p:", p)    
-        mlp_top_time += (time.perf_counter() - start_time)
-        
-        # clamp output if needed
+            # print(cling_bench_all['bot_time'],
+            #       cling_bench_all['emb_time'],
+            #       cling_bench_all['op_time'],
+            #       cling_bench_all['top_time'])
+            # sys.exit()
+
+        else:
+            start_time = time.perf_counter()
+
+            x = self.apply_mlp(dense_x, self.bot_l)
+
+            cling_bench_all['bot_time'].append(1000*(time.perf_counter() - start_time))
+            
+            
+            start_time = time.perf_counter()
+
+            ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l)
+
+            cling_bench_all['emb_time'].append(1000*(time.perf_counter() - start_time))
+            
+
+            start_time = time.perf_counter()
+                
+            z = self.interact_features(x, ly)
+
+            cling_bench_all['ops_time'].append(1000*(time.perf_counter() - start_time))
+            
+
+            start_time = time.perf_counter()
+
+            p = self.apply_mlp(z, self.top_l)
+
+            cling_bench_all['top_time'].append(1000*(time.perf_counter() - start_time))
+
+            
         if 0.0 < self.loss_threshold and self.loss_threshold < 1.0:
             z = torch.clamp(p, min=self.loss_threshold, max=(1.0 - self.loss_threshold))
         else:
             z = p
 
-        print("z:",z)    
+        print("z:",z[0:32])
+        cling_bench_all['prob'].append(z)
         return z
 
     def parallel_forward(self, dense_x, lS_o, lS_i):
         print("Using parallel forward:")
-        global mlp_top_time
-        global mlp_bot_time
-        global emb_time
-        global op_fea_time
+
+        global cling_bench_all
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
         
         ### prepare model (overwrite) ###
         # WARNING: # of devices must be >= batch size in parallel_forward call
         batch_size = dense_x.size()[0]
         ndevices = min(self.ndevices, batch_size, len(self.emb_l))
         device_ids = range(ndevices)
-        # print("parallel_forward->batch_size: ", batch_size, " ndevices: ", ndevices, " device_ids: ", device_ids )        
+        print("device_ids: ", device_ids)
+
         # WARNING: must redistribute the model if mini-batch size changes(this is common
         # for last mini-batch, when # of elements in the dataset/batch size is not even
         if self.parallel_model_batch_size != batch_size:
             # print("not prepared")
             self.parallel_model_is_not_prepared = True
 
+        start.record()
         if self.parallel_model_is_not_prepared or self.sync_dense_params:
-            #print("init replicas: ", device_ids)
             # replicate mlp (data parallelism)
             
             self.bot_l_replicas = replicate(self.bot_l, device_ids)
-            # print("bot_l:", self.bot_l)
-            #print("bot_l: ", self.bot_l[0].weight)
-            # print("bot_l_rep_0: ", self.bot_l_replicas[0][0].weight)
-            # print("bot_l_rep_1: ", self.bot_l_replicas[1][0].weight)
-
-            
             self.top_l_replicas = replicate(self.top_l, device_ids)
             self.parallel_model_batch_size = batch_size
-            # sys.exit()          
+
+        end.record()
+        torch.cuda.synchronize()
+        cling_bench_all['rep_mlp_time'].append(start.elapsed_time(end))
+
+
+        start.record()
 
         if self.parallel_model_is_not_prepared:
             # distribute embeddings (model parallelism)
@@ -853,18 +858,29 @@ class DLRM_Net(nn.Module):
                 self.v_W_l = w_list
             self.parallel_model_is_not_prepared = False
 
+        end.record()
+        torch.cuda.synchronize()
+        cling_bench_all['dis_emb_time'].append(start.elapsed_time(end))
+            
         ### prepare input (overwrite) ###
         # scatter dense features (data parallelism)
         # print(dense_x.device)
         # print("device_ids: ",device_ids)
         # print("before scatter: ", dense_x)
+
+        start.record()
+        
         dense_x = scatter(dense_x, device_ids, dim=0)
-        # print("after scatter: ", dense_x)
+        end.record()
+        torch.cuda.synchronize()
+        cling_bench_all['dis_den_time'].append(start.elapsed_time(end))
 
         # distribute sparse features (model parallelism)
         if (len(self.emb_l) != len(lS_o)) or (len(self.emb_l) != len(lS_i)):
             sys.exit("ERROR: corrupted model input detected in parallel_forward call")
 
+        start.record()
+            
         t_list = []
         i_list = []
         for k, _ in enumerate(self.emb_l):
@@ -873,6 +889,9 @@ class DLRM_Net(nn.Module):
             i_list.append(lS_i[k].to(d))
         lS_o = t_list
         lS_i = i_list
+        end.record()
+        torch.cuda.synchronize()
+        cling_bench_all['dis_spa_time'].append(start.elapsed_time(end))
 
         ### compute results in parallel ###
         # bottom mlp
@@ -881,28 +900,19 @@ class DLRM_Net(nn.Module):
         # inputs that has been scattered across devices on the first (batch) dimension.
         # The output is a list of tensors scattered across devices according to the
         # distribution of dense_x.
-        # mlp_flag = "bot"
-        # print("parallel_apply for bot mlp->device_ids: ", device_ids)
-        start_time = time.perf_counter()
-        #print("dense_x: ", dense_x)
-        #print("bot: ", self.bot_l_replicas[0][0].state_dict())
-        
+
+        start.record()
         x = parallel_apply(self.bot_l_replicas, dense_x, None, device_ids)
+        end.record()
+        torch.cuda.synchronize()
+        cling_bench_all['bot_time'].append(start.elapsed_time(end))
 
-        mlp_bot_time += (time.perf_counter() - start_time)
-        
-        # debug prints
-        #print("x:", x)
-        #sys.exit()
         # embeddings
-        start_time = time.perf_counter()
-        
+        start.record()
         ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l)
-
-        emb_time += (time.perf_counter() - start_time)
-        
-        # debug prints
-        # print("ly:", ly)
+        end.record()
+        torch.cuda.synchronize()
+        cling_bench_all['emb_time'].append(start.elapsed_time(end))
 
         # butterfly shuffle (implemented inefficiently for now)
         # WARNING: Note that at this point we have the result of the embedding lookup
@@ -913,20 +923,20 @@ class DLRM_Net(nn.Module):
         if len(self.emb_l) != len(ly):
             sys.exit("ERROR: corrupted intermediate result in parallel_forward call")
 
+        start.record()
         t_list = []
         for k, _ in enumerate(self.emb_l):
             d = torch.device("cuda:" + str(k % ndevices))
             y = scatter(ly[k], device_ids, dim=0)
-            #print("y: ", y)
             t_list.append(y)
         # adjust the list to be ordered per device
         ly = list(map(lambda y: list(y), zip(*t_list)))
-        # print("ly: ", ly)
-        # debug prints
-        # print(ly)
+        end.record()
+        torch.cuda.synchronize()
+        cling_bench_all['sca_emb_time'].append(start.elapsed_time(end))
 
         # interactions
-        start_time = time.perf_counter()
+        start.record()
         
         z = []
         for k in range(ndevices):
@@ -937,9 +947,10 @@ class DLRM_Net(nn.Module):
             #     print("lyk: ", ly[k])
             #     print("zk: ", zk)
             z.append(zk)
-        # debug prints
-        # print(z)
-        op_fea_time += (time.perf_counter() - start_time)
+
+        end.record()
+        torch.cuda.synchronize()
+        cling_bench_all['ops_time'].append(start.elapsed_time(end))
 
         # top mlp
         # WARNING: Note that the self.top_l is a list of top mlp modules that
@@ -949,15 +960,23 @@ class DLRM_Net(nn.Module):
         # distribution of z.
         # mlp_flag = "top"
         # print("parallel_apply for top mlp->device_ids: ", device_ids)
-        start_time = time.perf_counter()
+
+        start.record()
         
         p = parallel_apply(self.top_l_replicas, z, None, device_ids)
 
-        #print("p:",p)
-        mlp_top_time += (time.perf_counter() - start_time)
-
+        end.record()
+        torch.cuda.synchronize()
+        cling_bench_all['top_time'].append(start.elapsed_time(end))
+        
         ### gather the distributed results ###
+
+        start.record()
         p0 = gather(p, self.output_d, dim=0)
+        end.record()
+        torch.cuda.synchronize()
+        cling_bench_all['p_gather_time'].append(start.elapsed_time(end))
+
         #print("p0:", p0)
         # clamp output if needed
         if 0.0 < self.loss_threshold and self.loss_threshold < 1.0:
@@ -967,7 +986,9 @@ class DLRM_Net(nn.Module):
         else:
             z0 = p0
 
-        print("z0:",z0)    
+        print("z0:",z0[0:32])
+        cling_bench_all['prob'].append(z)
+        
         return z0
 
 
@@ -1015,36 +1036,17 @@ def inference(
         scores = []
         targets = []
 
-    global mlp_bot_time
-    global mlp_top_time
-    global emb_time
-    global op_fea_time
-    mlp_bot_time = 0
-    mlp_top_time = 0
-    emb_time = 0
-    op_fea_time = 0
-
 
     print("Inference start:")
-    start_time = time.perf_counter()
     for i, testBatch in enumerate(test_ld):
+        start_time = time.perf_counter()
 
-        #load_time = time.perf_counter() - start_time
-        # print(i)
-        # early exit if nbatches was set by the user and was exceeded
         if nbatches > 0 and i >= nbatches:
             break
 
-        # la_start = time.perf_counter()
-        
         X_test, lS_o_test, lS_i_test, T_test, W_test, CBPP_test = unpack_batch(
             testBatch
         )
-
-        # print("ls_o:", lS_o_test, len(lS_o_test[0]))
-        # print("ls_i:", lS_i_test, len(lS_i_test[0]))
-        # la_end = time.perf_counter()
-        # la4_time += (la_end - la_start)
 
         # Skip the batch if batch size not multiple of total ranks
         if ext_dist.my_size > 1 and X_test.size(0) % ext_dist.my_size != 0:
@@ -1052,9 +1054,7 @@ def inference(
             continue
 
         # forward pass
-        # la_start = time.perf_counter()
 
-        # print("forward start-> ndevice: ", ndevices)
         Z_test = dlrm_wrap(
             X_test,
             lS_o_test,
@@ -1063,16 +1063,6 @@ def inference(
             device,
             ndevices=ndevices,
         )
-        # print("forward ends")
-        # la_end = time.perf_counter()
-        # la3_time += (la_end - la_start)
-
-        # if (i<10):
-        #     print ("cuda? ", Z_test.is_cuda)
-        ### gather the distributed results on each rank ###
-        # For some reason it requires explicit sync before all_gather call if
-        # tensor is on GPU memory
-        # la_start = time.perf_counter()
 
         if Z_test.is_cuda:
             torch.cuda.synchronize()
@@ -1080,19 +1070,12 @@ def inference(
         if ext_dist.my_size > 1:
             Z_test = ext_dist.all_gather(Z_test, batch_split_lengths)
 
-        # la_end = time.perf_counter()
-        # la2_time += (la_end - la_start)
-
-            
         if args.mlperf_logging:
             S_test = Z_test.detach().cpu().numpy()  # numpy array
             T_test = T_test.detach().cpu().numpy()  # numpy array
             scores.append(S_test)
             targets.append(T_test)
         else:
-            # print("no need mlperf_logging")
-            # la_start = time.perf_counter()
-
             with record_function("DLRM accuracy compute"):
                 # compute loss and accuracy
                 S_test = Z_test.detach().cpu().numpy()  # numpy array
@@ -1104,9 +1087,7 @@ def inference(
                 test_accu += A_test
                 test_samp += mbs_test
                 
-        # la_end = time.perf_counter()
-        # la1_time += (la_end - la_start)
-
+        cling_bench_all['per_batch_time'].append(1000*(time.perf_counter() - start_time))
                 
     if args.mlperf_logging:
         with record_function("DLRM mlperf sklearn metrics compute"):
@@ -1190,27 +1171,80 @@ def inference(
         #     flush=True,
         # )
         
-    total_inference_time = time.perf_counter() - start_time
-    print("Inference time used: {:.2f} (ms)".format(1000*total_inference_time))
 
-    if not use_gpu:
-        print("batch size, mini batch size, mlp_bot(ms), mlp_top(ms), embedding(ms), op_feature(ms), total(ms), compute ratio(%)")
-    
-        print(
-            str(args.num_batches).rjust(len('batch_size')) + ", " +
-            str(args.mini_batch_size).rjust(len('mini_batch_size')) + ", " +        
-            "{:.2f}".format(mlp_bot_time*1000).rjust(len('mlp_bot(ms)')) + ", " +
-            "{:.2f}".format(mlp_top_time*1000).rjust(len('mlp_top(ms)')) + ", " +
-            "{:.2f}".format(emb_time*1000).rjust(len('embedding(ms)')) + ", " +
-            "{:.2f}".format(op_fea_time*1000).rjust(len('op_feature(ms)')) + ", " +
-            "{:.2f}".format(total_inference_time*1000).rjust(len('total(ms)')) + ", " +
-            "{:.2f}".format(100*((mlp_bot_time+mlp_top_time+emb_time+op_fea_time)/total_inference_time)).rjust(len('compute ratio(%)'))
-        )
-    # print("time for mlp bot: {:.3f} ms".format(mlp_bot_time*1000))
-    # print("time for mlp top: {:.3f} ms".format(mlp_top_time*1000))
-    # print("time for int fea: {:.3f} ms".format(int_fea_time*1000))
-    # print("    time for emb: {:.3f} ms".format(emb_time*1000))
-    # print("total time for inference: {:.3f} ms".format((end_time-start_time)*1000))
+    #print("ndevices:", ndevices)
+    if True:
+
+        if ndevices > 1:
+            print("batch index, rep_mlp(ms), dis_emb(ms), dis_den(ms), dis_spa(ms), sca_emd(ms), mlp_bot(ms), mlp_top(ms), embedding(ms), ops_feature(ms), p_gather(ms), per_batch_time(ms), ratio(%)")
+
+            for i in range(0, len(cling_bench_all['bot_time'])):
+                   rep_mlp_time =cling_bench_all['rep_mlp_time'][i]
+                   dis_emb_time = cling_bench_all['dis_emb_time'][i]
+                   dis_den_time = cling_bench_all['dis_den_time'][i]
+                   dis_spa_time = cling_bench_all['dis_spa_time'][i]
+                   sca_emb_time = cling_bench_all['sca_emb_time'][i]
+
+                   bot_time =cling_bench_all['bot_time'][i]
+                   top_time = cling_bench_all['top_time'][i]
+                   emb_time = cling_bench_all['emb_time'][i]
+                   ops_time = cling_bench_all['ops_time'][i]
+
+                   p_gather_time = cling_bench_all['p_gather_time'][i]
+                   
+                   per_batch_time = cling_bench_all['per_batch_time'][i]
+                   prob = cling_bench_all['prob'][i]
+                   print(
+                       str(i).rjust(len('batch index')) + ", " +
+                       "{:.2f}".format(rep_mlp_time).rjust(len('rep_mlp(ms)')) + ", " +
+                       "{:.2f}".format(dis_emb_time).rjust(len('dis_emb(ms)')) + ", " +
+                       "{:.2f}".format(dis_den_time).rjust(len('dis_den(ms)')) + ", " +
+                       "{:.2f}".format(dis_spa_time).rjust(len('dis_spa(ms)')) + ", " +
+                       "{:.2f}".format(sca_emb_time).rjust(len('sca_emb(ms)')) + ", " +
+
+                       
+                       "{:.2f}".format(bot_time).rjust(len('mlp_bot(ms)')) + ", " +
+                       "{:.2f}".format(top_time).rjust(len('mlp_top(ms)')) + ", " +
+                       "{:.2f}".format(emb_time).rjust(len('embedding(ms)')) + ", " +
+                       "{:.2f}".format(ops_time).rjust(len('ops_feature(ms)')) + ", " +
+
+                       "{:.2f}".format(p_gather_time).rjust(len('p_gather(ms)')) + ", " +
+
+                       "{:.2f}".format(per_batch_time).rjust(len('per_batch_time(ms)')) + ", " +
+                       "{:.2f}".format(100*((bot_time+top_time+emb_time+ops_time)/per_batch_time)).rjust(len('ratio(%)'))
+                   )
+                   
+        else:    
+        
+            print("batch index, mlp_bot(ms), mlp_top(ms), embedding(ms), ops_feature(ms), per_batch_time(ms), ratio(%)")
+
+            for i in range(0, len(cling_bench_all['bot_time'])):
+
+                   bot_time =cling_bench_all['bot_time'][i]
+                   top_time = cling_bench_all['top_time'][i]
+                   emb_time = cling_bench_all['emb_time'][i]
+                   ops_time = cling_bench_all['ops_time'][i]
+                   per_batch_time = cling_bench_all['per_batch_time'][i]
+                   prob = cling_bench_all['prob'][i]
+            
+                   print(
+                       str(i).rjust(len('batch index')) + ", " +
+                       "{:.2f}".format(bot_time).rjust(len('mlp_bot(ms)')) + ", " +
+                       "{:.2f}".format(top_time).rjust(len('mlp_top(ms)')) + ", " +
+                       "{:.2f}".format(emb_time).rjust(len('embedding(ms)')) + ", " +
+                       "{:.2f}".format(ops_time).rjust(len('ops_feature(ms)')) + ", " +
+                       "{:.2f}".format(per_batch_time).rjust(len('per_batch_time(ms)')) + ", " +
+                       "{:.2f}".format(100*((bot_time+top_time+emb_time+ops_time)/per_batch_time)).rjust(len('ratio(%)'))
+                   )
+
+
+        warm_up = 1
+        print("warm up value:", warm_up)
+        print("bot mean time (ms): {:.2f}".format(sum(cling_bench_all['bot_time'][warm_up:])/len(cling_bench_all['bot_time'][warm_up:])))     
+        print("top mean time (ms): {:.2f}".format(sum(cling_bench_all['top_time'][warm_up:])/len(cling_bench_all['top_time'][warm_up:])))     
+        print("emb mean time (ms): {:.2f}".format(sum(cling_bench_all['emb_time'][warm_up:])/len(cling_bench_all['emb_time'][warm_up:])))     
+        print("ops mean time (ms): {:.2f}".format(sum(cling_bench_all['ops_time'][warm_up:])/len(cling_bench_all['ops_time'][warm_up:])))     
+        print("per batch mean time (ms): {:.2f}".format(sum(cling_bench_all['per_batch_time'][warm_up:])/len(cling_bench_all['per_batch_time'][warm_up:])))     
     
     return model_metrics_dict, is_best
 
@@ -1387,7 +1421,6 @@ def run():
 
     ### some basic setup ###
     np.random.seed(args.numpy_rand_seed)
-    print("np rand seed:", np.random.get_state()[1][0])
     
     np.set_printoptions(precision=args.print_precision)
     torch.set_printoptions(precision=args.print_precision)
@@ -1652,9 +1685,8 @@ def run():
     ### construct the neural network specified above ###
     # WARNING: to obtain exactly the same initialization for
     # the weights wse need to start from the same random seed.
-    np.random.seed(args.numpy_rand_seed)
+    #np.random.seed(args.numpy_rand_seed)
 
-    print("np rand seed:", np.random.get_state()[1][0])
     
     global dlrm
     print("ln_emb shape: ", ln_emb)
