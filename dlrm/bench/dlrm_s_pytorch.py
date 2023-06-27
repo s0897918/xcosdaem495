@@ -719,7 +719,7 @@ class DLRM_Net(nn.Module):
         return z
 
     def sequential_forward(self, dense_x, lS_o, lS_i):
-        print("Using sequential forward:")
+        #print("Using sequential forward:")
 
         global cling_bench_all
 
@@ -799,12 +799,12 @@ class DLRM_Net(nn.Module):
         else:
             z = p
 
-        print("z:",z[0:32])
+        #print("z:",z[0:32])
         cling_bench_all['prob'].append(z)
         return z
 
     def parallel_forward(self, dense_x, lS_o, lS_i):
-        print("Using parallel forward:")
+        #print("Using parallel forward:")
 
         global cling_bench_all
         start = torch.cuda.Event(enable_timing=True)
@@ -823,7 +823,9 @@ class DLRM_Net(nn.Module):
             # print("not prepared")
             self.parallel_model_is_not_prepared = True
 
-        start.record()
+        if args.record_gpu_time:    
+            start.record()
+            
         if self.parallel_model_is_not_prepared or self.sync_dense_params:
             # replicate mlp (data parallelism)
             
@@ -831,12 +833,13 @@ class DLRM_Net(nn.Module):
             self.top_l_replicas = replicate(self.top_l, device_ids)
             self.parallel_model_batch_size = batch_size
 
-        end.record()
-        torch.cuda.synchronize()
-        cling_bench_all['rep_mlp_time'].append(start.elapsed_time(end))
+        if args.record_gpu_time:    
+            end.record()
+            torch.cuda.synchronize()
+            cling_bench_all['rep_mlp_time'].append(start.elapsed_time(end))
 
-
-        start.record()
+        if args.record_gpu_time:    
+            start.record()
 
         if self.parallel_model_is_not_prepared:
             # distribute embeddings (model parallelism)
@@ -858,28 +861,32 @@ class DLRM_Net(nn.Module):
                 self.v_W_l = w_list
             self.parallel_model_is_not_prepared = False
 
-        end.record()
-        torch.cuda.synchronize()
-        cling_bench_all['dis_emb_time'].append(start.elapsed_time(end))
+        if args.record_gpu_time:    
+            end.record()
+            torch.cuda.synchronize()
+            cling_bench_all['dis_emb_time'].append(start.elapsed_time(end))
             
         ### prepare input (overwrite) ###
         # scatter dense features (data parallelism)
         # print(dense_x.device)
         # print("device_ids: ",device_ids)
         # print("before scatter: ", dense_x)
-
-        start.record()
+        if args.record_gpu_time:    
+            start.record()
         
         dense_x = scatter(dense_x, device_ids, dim=0)
-        end.record()
-        torch.cuda.synchronize()
-        cling_bench_all['dis_den_time'].append(start.elapsed_time(end))
+        
+        if args.record_gpu_time:    
+            end.record()
+            torch.cuda.synchronize()
+            cling_bench_all['dis_den_time'].append(start.elapsed_time(end))
 
         # distribute sparse features (model parallelism)
         if (len(self.emb_l) != len(lS_o)) or (len(self.emb_l) != len(lS_i)):
             sys.exit("ERROR: corrupted model input detected in parallel_forward call")
 
-        start.record()
+        if args.record_gpu_time:    
+            start.record()
             
         t_list = []
         i_list = []
@@ -889,9 +896,11 @@ class DLRM_Net(nn.Module):
             i_list.append(lS_i[k].to(d))
         lS_o = t_list
         lS_i = i_list
-        end.record()
-        torch.cuda.synchronize()
-        cling_bench_all['dis_spa_time'].append(start.elapsed_time(end))
+
+        if args.record_gpu_time:            
+            end.record()
+            torch.cuda.synchronize()
+            cling_bench_all['dis_spa_time'].append(start.elapsed_time(end))
 
         ### compute results in parallel ###
         # bottom mlp
@@ -900,19 +909,26 @@ class DLRM_Net(nn.Module):
         # inputs that has been scattered across devices on the first (batch) dimension.
         # The output is a list of tensors scattered across devices according to the
         # distribution of dense_x.
-
-        start.record()
+        if args.record_gpu_time:    
+            start.record()
+            
         x = parallel_apply(self.bot_l_replicas, dense_x, None, device_ids)
-        end.record()
-        torch.cuda.synchronize()
-        cling_bench_all['bot_time'].append(start.elapsed_time(end))
+
+        if args.record_gpu_time:    
+            end.record()
+            torch.cuda.synchronize()
+            cling_bench_all['bot_time'].append(start.elapsed_time(end))
 
         # embeddings
-        start.record()
+        if args.record_gpu_time:    
+            start.record()
+            
         ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l)
-        end.record()
-        torch.cuda.synchronize()
-        cling_bench_all['emb_time'].append(start.elapsed_time(end))
+
+        if args.record_gpu_time:    
+            end.record()
+            torch.cuda.synchronize()
+            cling_bench_all['emb_time'].append(start.elapsed_time(end))
 
         # butterfly shuffle (implemented inefficiently for now)
         # WARNING: Note that at this point we have the result of the embedding lookup
@@ -923,7 +939,9 @@ class DLRM_Net(nn.Module):
         if len(self.emb_l) != len(ly):
             sys.exit("ERROR: corrupted intermediate result in parallel_forward call")
 
-        start.record()
+        if args.record_gpu_time:                
+            start.record()
+            
         t_list = []
         for k, _ in enumerate(self.emb_l):
             d = torch.device("cuda:" + str(k % ndevices))
@@ -931,12 +949,15 @@ class DLRM_Net(nn.Module):
             t_list.append(y)
         # adjust the list to be ordered per device
         ly = list(map(lambda y: list(y), zip(*t_list)))
-        end.record()
-        torch.cuda.synchronize()
-        cling_bench_all['sca_emb_time'].append(start.elapsed_time(end))
+
+        if args.record_gpu_time:    
+            end.record()
+            torch.cuda.synchronize()
+            cling_bench_all['sca_emb_time'].append(start.elapsed_time(end))
 
         # interactions
-        start.record()
+        if args.record_gpu_time:    
+            start.record()
         
         z = []
         for k in range(ndevices):
@@ -948,9 +969,10 @@ class DLRM_Net(nn.Module):
             #     print("zk: ", zk)
             z.append(zk)
 
-        end.record()
-        torch.cuda.synchronize()
-        cling_bench_all['ops_time'].append(start.elapsed_time(end))
+        if args.record_gpu_time:    
+            end.record()
+            torch.cuda.synchronize()
+            cling_bench_all['ops_time'].append(start.elapsed_time(end))
 
         # top mlp
         # WARNING: Note that the self.top_l is a list of top mlp modules that
@@ -960,24 +982,27 @@ class DLRM_Net(nn.Module):
         # distribution of z.
         # mlp_flag = "top"
         # print("parallel_apply for top mlp->device_ids: ", device_ids)
-
-        start.record()
+        if args.record_gpu_time:    
+            start.record()
         
         p = parallel_apply(self.top_l_replicas, z, None, device_ids)
 
-        end.record()
-        torch.cuda.synchronize()
-        cling_bench_all['top_time'].append(start.elapsed_time(end))
+        if args.record_gpu_time:    
+            end.record()
+            torch.cuda.synchronize()
+            cling_bench_all['top_time'].append(start.elapsed_time(end))
         
         ### gather the distributed results ###
-
-        start.record()
+        if args.record_gpu_time:    
+            start.record()
+            
         p0 = gather(p, self.output_d, dim=0)
-        end.record()
-        torch.cuda.synchronize()
-        cling_bench_all['p_gather_time'].append(start.elapsed_time(end))
 
-        #print("p0:", p0)
+        if args.record_gpu_time:    
+            end.record()
+            torch.cuda.synchronize()
+            cling_bench_all['p_gather_time'].append(start.elapsed_time(end))
+
         # clamp output if needed
         if 0.0 < self.loss_threshold and self.loss_threshold < 1.0:
             z0 = torch.clamp(
@@ -986,7 +1011,7 @@ class DLRM_Net(nn.Module):
         else:
             z0 = p0
 
-        print("z0:",z0[0:32])
+        #print("z0:",z0[0:32])
         cling_bench_all['prob'].append(z)
         
         return z0
@@ -1314,6 +1339,8 @@ def run():
     # m3
     parser.add_argument("--debug-m3", action="store_true", default=False)
     parser.add_argument("--debug-m3-no", action="store_true", default=False)
+    parser.add_argument("--record-gpu-time-no", action="store_true", default=False)
+    parser.add_argument("--record-gpu-time", action="store_true", default=False)
     
     parser.add_argument("--use-m3-bot-mlp", action="store_true", default=False)
     parser.add_argument("--use-m3-top-mlp", action="store_true", default=False)
@@ -1389,6 +1416,10 @@ def run():
     global writer
     args = parser.parse_args()
     # print("m3: ", args.arch_mlp_m3)
+
+    if args.record_gpu_time:
+        sys.exit("eeo")
+    
     if args.dataset_multiprocessing:
         assert float(sys.version[:3]) > 3.7, (
             "The dataset_multiprocessing "

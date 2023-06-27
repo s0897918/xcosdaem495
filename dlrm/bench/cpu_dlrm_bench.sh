@@ -1,8 +1,8 @@
 #!/bin/bash
 
 
-mb_size=2
-nbatches=1 
+mb_size=2048
+nbatches=10 
 
 
 #M3 setup
@@ -16,7 +16,6 @@ nsockets="0"
 numa_cmd="numactl --physcpubind=0-$((ncores-1)) -m $nsockets" #run on one socket, without HT
 dlrm_pt_bin="python dlrm_s_pytorch.py"
 print_freq=100
-rand_seed=727
 emb_size=128
 nindices=100
 interaction="dot"
@@ -29,7 +28,6 @@ _args="--mini-batch-size="${mb_size}\
 " --arch-sparse-feature-size="${emb_size}\
 " --num-indices-per-lookup="${nindices}\
 " --arch-interaction-op="${interaction}\
-" --numpy-rand-seed="${rand_seed}\
 " --print-freq="${print_freq}\
 " --print-time"
 
