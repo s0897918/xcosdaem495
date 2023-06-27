@@ -724,40 +724,52 @@ class DLRM_Net(nn.Module):
         global cling_bench_all
 
         if args.use_gpu:
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-        
-            start.record()
+
+            if args.record_gpu_time:
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+
+            if args.record_gpu_time:                
+                start.record()
+                
             x = self.apply_mlp(dense_x, self.bot_l)
-            end.record()
-            torch.cuda.synchronize()
 
-            cling_bench_all['bot_time'].append(start.elapsed_time(end))
+            if args.record_gpu_time:
+                end.record()
+                torch.cuda.synchronize()
+                cling_bench_all['bot_time'].append(start.elapsed_time(end))
 
-            start.record()
+            if args.record_gpu_time:
+                start.record()
+                
             ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l)
-            end.record()
-            torch.cuda.synchronize()
 
-            cling_bench_all['emb_time'].append(start.elapsed_time(end))
+            if args.record_gpu_time:
+                end.record()
+                torch.cuda.synchronize()
+                cling_bench_all['emb_time'].append(start.elapsed_time(end))
             
 
-            start.record()
+            if args.record_gpu_time:
+                start.record()
         
             z = self.interact_features(x, ly)
-            end.record()
-            torch.cuda.synchronize()
 
-            cling_bench_all['ops_time'].append(start.elapsed_time(end))
+            if args.record_gpu_time:
+                end.record()
+                torch.cuda.synchronize()
+                cling_bench_all['ops_time'].append(start.elapsed_time(end))
 
 
-
-            start.record()
+            if args.record_gpu_time:
+                start.record()
+                
             p = self.apply_mlp(z, self.top_l)
-            end.record()
-            torch.cuda.synchronize()
 
-            cling_bench_all['top_time'].append(start.elapsed_time(end))
+            if args.record_gpu_time:
+                end.record()
+                torch.cuda.synchronize()
+                cling_bench_all['top_time'].append(start.elapsed_time(end))
 
             # print(cling_bench_all['bot_time'],
             #       cling_bench_all['emb_time'],
@@ -807,8 +819,10 @@ class DLRM_Net(nn.Module):
         #print("Using parallel forward:")
 
         global cling_bench_all
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
+        
+        if args.record_gpu_time:
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
         
         ### prepare model (overwrite) ###
         # WARNING: # of devices must be >= batch size in parallel_forward call
@@ -1203,7 +1217,7 @@ def inference(
         if ndevices > 1:
             print("batch index, rep_mlp(ms), dis_emb(ms), dis_den(ms), dis_spa(ms), sca_emd(ms), mlp_bot(ms), mlp_top(ms), embedding(ms), ops_feature(ms), p_gather(ms), per_batch_time(ms), ratio(%)")
 
-            for i in range(0, len(cling_bench_all['bot_time'])):
+            for i in range(0, len(cling_bench_all['per_batch_time'])):
                    rep_mlp_time =cling_bench_all['rep_mlp_time'][i]
                    dis_emb_time = cling_bench_all['dis_emb_time'][i]
                    dis_den_time = cling_bench_all['dis_den_time'][i]
@@ -1243,7 +1257,7 @@ def inference(
         
             print("batch index, mlp_bot(ms), mlp_top(ms), embedding(ms), ops_feature(ms), per_batch_time(ms), ratio(%)")
 
-            for i in range(0, len(cling_bench_all['bot_time'])):
+            for i in range(0, len(cling_bench_all['per_batch_time'])):
 
                    bot_time =cling_bench_all['bot_time'][i]
                    top_time = cling_bench_all['top_time'][i]
