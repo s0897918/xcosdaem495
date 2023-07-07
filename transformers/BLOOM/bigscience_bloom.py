@@ -11,14 +11,12 @@ input_sentense = [
     #  "Currently, AI practitioners have very limited flexibility when choosing a high-performance",
     # "A machine learning system designed for one technology provider’s GPU must be completely reimplemented in order to work on a different provider’s hardware. This lack"
 ]
-device_idx = 1
+device_idx = 0
 top_k = 1
-token_lengths = [25,50,100,200,300,400,500,600,700,800]
-# token_lengths = [20]
+#token_lengths = [25,50,100,200,300,400,500,600,700,800]
+token_lengths = [20]
 do_sample_flag = True
 token_length=100
-# generator_c = pipeline('text-generation', model=model_list[0], max_new_tokens=token_length+5, min_new_tokens=token_length, do_sample=do_sample_flag, top_k=top_k)
-# generator_g = pipeline('text-generation', model=model_list[0], max_new_tokens=token_length+5, min_new_tokens=token_length, do_sample=do_sample_flag, top_k=top_k, device=1)
 
 def time_eclapsed(token_length, sentense, model, device):
     # start_time = time.perf_counter()
