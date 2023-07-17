@@ -117,12 +117,72 @@ def time_wrap(use_gpu):
     return time.time()
 
 
+
+from torch import cuda
+
+
+def get_less_used_gpu(gpus=None, debug=False):
+    """Inspect cached/reserved and allocated memory on specified gpus and return the id of the less used device"""
+    if gpus is None:
+        warn = 'Falling back to default: all gpus'
+        gpus = range(cuda.device_count())
+    elif isinstance(gpus, str):
+        gpus = [int(el) for el in gpus.split(',')]
+
+    # check gpus arg VS available gpus
+    sys_gpus = list(range(cuda.device_count()))
+    if len(gpus) > len(sys_gpus):
+        gpus = sys_gpus
+        warn = f'WARNING: Specified {len(gpus)} gpus, but only {cuda.device_count()} available. Falling back to default: all gpus.\nIDs:\t{list(gpus)}'
+    elif set(gpus).difference(sys_gpus):
+        # take correctly specified and add as much bad specifications as unused system gpus
+        available_gpus = set(gpus).intersection(sys_gpus)
+        unavailable_gpus = set(gpus).difference(sys_gpus)
+        unused_gpus = set(sys_gpus).difference(gpus)
+        gpus = list(available_gpus) + list(unused_gpus)[:len(unavailable_gpus)]
+        warn = f'GPU ids {unavailable_gpus} not available. Falling back to {len(gpus)} device(s).\nIDs:\t{list(gpus)}'
+
+    cur_allocated_mem = {}
+    cur_cached_mem = {}
+    max_allocated_mem = {}
+    max_cached_mem = {}
+    for i in gpus:
+        cur_allocated_mem[i] = cuda.memory_allocated(i)
+        cur_cached_mem[i] = cuda.memory_reserved(i)
+        max_allocated_mem[i] = cuda.max_memory_allocated(i)
+        max_cached_mem[i] = cuda.max_memory_reserved(i)
+    min_allocated = min(cur_allocated_mem, key=cur_allocated_mem.get)
+    if debug:
+        print(warn)
+        print('Current allocated memory:', {f'cuda:{k}': v for k, v in cur_allocated_mem.items()})
+        print('Current reserved memory:', {f'cuda:{k}': v for k, v in cur_cached_mem.items()})
+        print('Maximum allocated memory:', {f'cuda:{k}': v for k, v in max_allocated_mem.items()})
+        print('Maximum reserved memory:', {f'cuda:{k}': v for k, v in max_cached_mem.items()})
+        print('Suggested GPU:', min_allocated)
+    return min_allocated
+
+def free_memory(to_delete: list, debug=False):
+    import gc
+    import inspect
+    calling_namespace = inspect.currentframe().f_back
+    if debug:
+        print('Before:')
+        get_less_used_gpu(debug=True)
+
+    for _var in to_delete:
+        calling_namespace.f_locals.pop(_var, None)
+        gc.collect()
+        cuda.empty_cache()
+    if debug:
+        print('After:')
+        get_less_used_gpu(debug=True)
+        
 def dlrm_wrap(X, lS_o, lS_i, use_gpu, device, ndevices=1):
-    # print("dlrm_warp: ")
-    # print("ls_o: ", lS_o)
-    # print("ls_i: ", lS_i)
+
+
+    #print("dlrm_warp")
     with record_function("DLRM forward"):
-        # print("under DLRM forward: ")
+        #print("under DLRM forward: ")
         if use_gpu:  # .cuda()
             # lS_i can be either a list of tensors or a stacked tensor.
             # Handle each case below:
@@ -137,8 +197,25 @@ def dlrm_wrap(X, lS_o, lS_i, use_gpu, device, ndevices=1):
                     if isinstance(lS_o, list)
                     else lS_o.to(device)
                 )
-        # print("before dlrm: ")        
-        return dlrm(X.to(device), lS_o, lS_i)
+        # print("before dlrm: ")
+        #print("ls_o: ", lS_o)
+        #print("ls_i: ", lS_i)
+
+        #return dlrm(X.to(device), lS_o, lS_i)
+        X = X.to(device)
+
+        R = dlrm(X, lS_o, lS_i)
+        #del X_d
+        # del X
+        # del lS_o
+        # del lS_i
+        #X_d = None
+        #X = None
+        #free_memory(tuple([lS_o]), debug=False)
+        # gc.collect()
+        # torch.cuda.empty_cache()
+        return R
+        
 
 
 def loss_fn_wrap(Z, T, use_gpu, device):
@@ -195,11 +272,15 @@ class LRPolicyScheduler(_LRScheduler):
                 lr = self.base_lrs
         return lr
 
+
+
+#cling def
 cling_bench_all = {'bot_time':[],
                    'top_time':[],
                    'ops_time':[],
                    'emb_time':[],
-                   'per_batch_time':[],
+                   'per_batch_comp_time':[],
+                   'per_batch_load_time':[],
                    'rep_mlp_time':[],
                    'dis_emb_time':[],
                    'dis_den_time':[],
@@ -207,6 +288,16 @@ cling_bench_all = {'bot_time':[],
                    'sca_emb_time':[],
                    'p_gather_time':[],
                    'prob':[]}    
+
+def check_cuda_memory_used(msg, device_ids):
+    for d in device_ids:
+        dp = torch.cuda.get_device_properties(d)
+        total = dp.total_memory
+        allocated = torch.cuda.max_memory_allocated(d)
+        free = (total-allocated)
+        unit=1024*1024*1024
+        print(msg)
+        print("cuda:%d -> Allocated: %5.4f (G), Free: %5.4f (G):" %(d, allocated/unit, free/unit))
 
 ### define dlrm in PyTorch ###
 class DLRM_Net(nn.Module):
@@ -381,6 +472,58 @@ class DLRM_Net(nn.Module):
         #print("emb:",emb_l[0].state_dict())
         return emb_l, v_W_l
 
+    def replicas_mlp(self, ndevices):
+        #print("ra", device_ids)
+        device_ids = range(ndevices)
+        if self.parallel_model_is_not_prepared or self.sync_dense_params:
+            # replicate mlp (data parallelism)
+
+            if not args.no_mlp_bot:
+                self.bot_l_replicas = replicate(self.bot_l, device_ids)
+            
+            check_cuda_memory_used('After replicas bot', device_ids)
+            
+            self.top_l_replicas = replicate(self.top_l, device_ids)
+            
+            check_cuda_memory_used('After replicas top', device_ids)
+            
+
+    def distribute_emb(self, ndevices):
+        check_cuda_memory_used('Before distribute emb', range(ndevices))
+
+        ##if there are 128 x EmbeddingBag(4096, 128) 
+        ##
+        ##
+        if self.parallel_model_is_not_prepared:
+            # distribute embeddings (model parallelism)
+            t_list = []
+            w_list = []
+
+            for k, emb in enumerate(self.emb_l):
+                #print("k, emb:", k, emb)
+                d = torch.device("cuda:" + str(k % ndevices))
+                t_list.append(emb.to(d))
+                if self.weighted_pooling == "learned":
+                    w_list.append(Parameter(self.v_W_l[k].to(d)))
+                elif self.weighted_pooling == "fixed":
+                    w_list.append(self.v_W_l[k].to(d))
+                else:
+                    w_list.append(None)
+            self.emb_l = nn.ModuleList(t_list)
+            #print("self.emb_l:", self.emb_l.state_dict())
+            #print("2. emb_l:", self.emb_l)
+            #sys.exit()
+            if self.weighted_pooling == "learned":
+                self.v_W_l = nn.ParameterList(w_list)
+            else:
+                self.v_W_l = w_list
+                
+            self.parallel_model_is_not_prepared = False
+            
+        check_cuda_memory_used('After distribute emb', range(ndevices))
+            #sys.exit()
+        
+        
     def __init__(
         self,
         m_spa=None,
@@ -443,7 +586,6 @@ class DLRM_Net(nn.Module):
             if self.md_flag:
                 self.md_threshold = md_threshold
 
-            # print("cling 1")
             # sys.exit()
             # If running distributed, get local slice of embedding tables
             if ext_dist.my_size > 1:
@@ -484,8 +626,9 @@ class DLRM_Net(nn.Module):
             # print("ln_bot, ln_top: ", ln_bot, ln_top)
             # if args.arch_m3_bot_mlp:
             #     self.bot_l = self.create_m3_mlp(args.arch_m3_mlp_lys, 128, 128)
-            # else:    
-            self.bot_l = self.create_mlp(ln_bot, sigmoid_bot)
+            # else:
+            if not args.no_mlp_bot:
+                self.bot_l = self.create_mlp(ln_bot, sigmoid_bot)
                 
             # if args.arch_m3_top_mlp:
             #     self.top_l = self.create_m3_mlp(args.arch_m3_mlp_lys, ln_top[0], 1)
@@ -607,15 +750,21 @@ class DLRM_Net(nn.Module):
         self.quantize_bits = bits
 
     def interact_features(self, x, ly):
-
+        #print("x:",x)
+        #print("ly:",ly)
         # global int_fea_time
         # start_time = time.perf_counter()
         if self.arch_interaction_op == "dot":
             # concatenate dense and sparse features
             (batch_size, d) = x.shape
+            #print("batch_size, d:", batch_size, d)
+            
             T = torch.cat([x] + ly, dim=1).view((batch_size, -1, d))
             # perform a dot product
             Z = torch.bmm(T, torch.transpose(T, 1, 2))
+            #print("T:",T)
+            #print("Z:",Z)
+            
             # append dense feature with the interactions (into a row vector)
             # approach 1: all
             # Zflat = Z.view((batch_size, -1))
@@ -628,12 +777,38 @@ class DLRM_Net(nn.Module):
             offset = 1 if self.arch_interaction_itself else 0
             li = torch.tensor([i for i in range(ni) for j in range(i + offset)])
             lj = torch.tensor([j for i in range(nj) for j in range(i + offset)])
+
+            #print("li:",li)
+            #print("lj:",lj)
+            
             Zflat = Z[:, li, lj]
+            #print("zflat:", Zflat)
             # concatenate dense features and interactions
+            
             R = torch.cat([x] + [Zflat], dim=1)
+            #print("R:",R)
+
         elif self.arch_interaction_op == "cat":
             # concatenation features (into a row vector)
             R = torch.cat([x] + ly, dim=1)
+
+        elif self.arch_interaction_op == "mean":
+            #print("x:",x)
+            #print("ly:",ly)
+            (batch_size, d) = x.shape
+
+            
+            T = torch.cat([x] + ly, dim=1).view((batch_size, -1, d))
+            #T = torch.cat(ly, dim=1)
+            #print("T:",T)
+            R = T_mean = torch.mean(T, dim=1)
+            
+            #print("T mean:",T_mean)
+            #T_cat = torch.cat((x,T_mean))
+            #print("T_cat:",T_cat)
+            #R = torch.cat([x]+ torch.mean(T,1))
+            #print("R:", R)
+            #sys.exit("op=mean")
         else:
             sys.exit(
                 "ERROR: --arch-interaction-op="
@@ -646,6 +821,7 @@ class DLRM_Net(nn.Module):
         
         return R
 
+            
     def forward(self, dense_x, lS_o, lS_i):
         # print("ndevices in forward:", self.ndevices)
         if ext_dist.my_size > 1:
@@ -720,56 +896,78 @@ class DLRM_Net(nn.Module):
 
     def sequential_forward(self, dense_x, lS_o, lS_i):
         #print("Using sequential forward:")
-
+        #print(dense_x)
+        #sys.exit()
         global cling_bench_all
-
+        #print("self.emb_l:", self.emb_l)
+        #sys.exit()
+        
         if args.use_gpu:
 
             if args.record_gpu_time:
                 start = torch.cuda.Event(enable_timing=True)
                 end = torch.cuda.Event(enable_timing=True)
 
+            #check_cuda_memory_used('Before apply mlp bot', range(1))
+
             if args.record_gpu_time:                
                 start.record()
-                
-            x = self.apply_mlp(dense_x, self.bot_l)
 
+            # x
+            if not args.no_mlp_bot:
+                x = self.apply_mlp(dense_x, self.bot_l)
+            else:
+                x = dense_x
+
+            #print(dense_x)
+            #sys.exit()
+            
             if args.record_gpu_time:
                 end.record()
                 torch.cuda.synchronize()
                 cling_bench_all['bot_time'].append(start.elapsed_time(end))
 
+            #check_cuda_memory_used('After apply mlp bot', range(1))
+
             if args.record_gpu_time:
                 start.record()
-                
+            # ly 
             ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l)
 
             if args.record_gpu_time:
                 end.record()
                 torch.cuda.synchronize()
                 cling_bench_all['emb_time'].append(start.elapsed_time(end))
-            
+                
+            #check_cuda_memory_used('After apply emb', range(1))
+
 
             if args.record_gpu_time:
                 start.record()
-        
+            # z
             z = self.interact_features(x, ly)
+            #del x
+            #del ly
 
             if args.record_gpu_time:
                 end.record()
                 torch.cuda.synchronize()
                 cling_bench_all['ops_time'].append(start.elapsed_time(end))
 
+            #check_cuda_memory_used('After apply ops', range(1))
 
             if args.record_gpu_time:
                 start.record()
-                
+            # p    
             p = self.apply_mlp(z, self.top_l)
+            #del z
 
             if args.record_gpu_time:
                 end.record()
                 torch.cuda.synchronize()
                 cling_bench_all['top_time'].append(start.elapsed_time(end))
+                
+            #check_cuda_memory_used('After apply top mlp', range(1))
 
             # print(cling_bench_all['bot_time'],
             #       cling_bench_all['emb_time'],
@@ -780,10 +978,15 @@ class DLRM_Net(nn.Module):
         else:
             start_time = time.perf_counter()
 
-            x = self.apply_mlp(dense_x, self.bot_l)
+            if not args.no_mlp_bot:
+                x = self.apply_mlp(dense_x, self.bot_l)
+            else:
+                x = dense_x
 
             cling_bench_all['bot_time'].append(1000*(time.perf_counter() - start_time))
             
+            #print(dense_x)
+            #sys.exit()
             
             start_time = time.perf_counter()
 
@@ -811,8 +1014,11 @@ class DLRM_Net(nn.Module):
         else:
             z = p
 
-        #print("z:",z[0:32])
+        if args.debug_m3:    
+            print("outputs:",z[0:4].transpose(0,1).detach().cpu())
+            
         cling_bench_all['prob'].append(z)
+        #del p
         return z
 
     def parallel_forward(self, dense_x, lS_o, lS_i):
@@ -827,9 +1033,11 @@ class DLRM_Net(nn.Module):
         ### prepare model (overwrite) ###
         # WARNING: # of devices must be >= batch size in parallel_forward call
         batch_size = dense_x.size()[0]
+        #print("bs:", batch_size)
+        #sys.exit()
         ndevices = min(self.ndevices, batch_size, len(self.emb_l))
         device_ids = range(ndevices)
-        print("device_ids: ", device_ids)
+        #print("device_ids: ", device_ids)
 
         # WARNING: must redistribute the model if mini-batch size changes(this is common
         # for last mini-batch, when # of elements in the dataset/batch size is not even
@@ -841,11 +1049,19 @@ class DLRM_Net(nn.Module):
             start.record()
             
         if self.parallel_model_is_not_prepared or self.sync_dense_params:
-            # replicate mlp (data parallelism)
-            
-            self.bot_l_replicas = replicate(self.bot_l, device_ids)
-            self.top_l_replicas = replicate(self.top_l, device_ids)
             self.parallel_model_batch_size = batch_size
+            #print("bs:", batch_size)
+            
+        # if self.parallel_model_is_not_prepared or self.sync_dense_params:
+        #     # replicate mlp (data parallelism)
+            
+        #     self.bot_l_replicas = replicate(self.bot_l, device_ids)
+            
+        #     #check_cuda_memory_used('replicas bot', device_ids)
+        #     self.top_l_replicas = replicate(self.top_l, device_ids)
+        #     #check_cuda_memory_used('replicas top', device_ids)
+
+        #     self.parallel_model_batch_size = batch_size
 
         if args.record_gpu_time:    
             end.record()
@@ -855,36 +1071,43 @@ class DLRM_Net(nn.Module):
         if args.record_gpu_time:    
             start.record()
 
-        if self.parallel_model_is_not_prepared:
-            # distribute embeddings (model parallelism)
-            t_list = []
-            w_list = []
-            for k, emb in enumerate(self.emb_l):
-                d = torch.device("cuda:" + str(k % ndevices))
-                t_list.append(emb.to(d))
-                if self.weighted_pooling == "learned":
-                    w_list.append(Parameter(self.v_W_l[k].to(d)))
-                elif self.weighted_pooling == "fixed":
-                    w_list.append(self.v_W_l[k].to(d))
-                else:
-                    w_list.append(None)
-            self.emb_l = nn.ModuleList(t_list)
-            if self.weighted_pooling == "learned":
-                self.v_W_l = nn.ParameterList(w_list)
-            else:
-                self.v_W_l = w_list
-            self.parallel_model_is_not_prepared = False
+        # if self.parallel_model_is_not_prepared:
+        #     # distribute embeddings (model parallelism)
+        #     t_list = []
+        #     w_list = []
+        #     #print("1. emb_l:", self.emb_l)
+        #     for k, emb in enumerate(self.emb_l):
+        #         d = torch.device("cuda:" + str(k % ndevices))
+        #         t_list.append(emb.to(d))
+        #         if self.weighted_pooling == "learned":
+        #             w_list.append(Parameter(self.v_W_l[k].to(d)))
+        #         elif self.weighted_pooling == "fixed":
+        #             w_list.append(self.v_W_l[k].to(d))
+        #         else:
+        #             w_list.append(None)
+        #     self.emb_l = nn.ModuleList(t_list)
+        #     #print("2. emb_l:", self.emb_l)
+        #     #sys.exit()
+        #     if self.weighted_pooling == "learned":
+        #         self.v_W_l = nn.ParameterList(w_list)
+        #     else:
+        #         self.v_W_l = w_list
+        #     self.parallel_model_is_not_prepared = False
 
         if args.record_gpu_time:    
             end.record()
             torch.cuda.synchronize()
             cling_bench_all['dis_emb_time'].append(start.elapsed_time(end))
+
+        #check_cuda_memory_used('dis emb', device_ids)
             
         ### prepare input (overwrite) ###
         # scatter dense features (data parallelism)
         # print(dense_x.device)
         # print("device_ids: ",device_ids)
         # print("before scatter: ", dense_x)
+        #check_cuda_memory_used('Before distribute den', device_ids)
+        
         if args.record_gpu_time:    
             start.record()
         
@@ -894,6 +1117,8 @@ class DLRM_Net(nn.Module):
             end.record()
             torch.cuda.synchronize()
             cling_bench_all['dis_den_time'].append(start.elapsed_time(end))
+
+        #check_cuda_memory_used('After distribute den', device_ids)
 
         # distribute sparse features (model parallelism)
         if (len(self.emb_l) != len(lS_o)) or (len(self.emb_l) != len(lS_i)):
@@ -916,6 +1141,8 @@ class DLRM_Net(nn.Module):
             torch.cuda.synchronize()
             cling_bench_all['dis_spa_time'].append(start.elapsed_time(end))
 
+        #check_cuda_memory_used('dis_spa', device_ids)
+            
         ### compute results in parallel ###
         # bottom mlp
         # WARNING: Note that the self.bot_l is a list of bottom mlp modules
@@ -925,17 +1152,25 @@ class DLRM_Net(nn.Module):
         # distribution of dense_x.
         if args.record_gpu_time:    
             start.record()
+
+        if not args.no_mlp_bot:    
+            x = parallel_apply(self.bot_l_replicas, dense_x, None, device_ids)
+        else:
+            x = dense_x
+
             
-        x = parallel_apply(self.bot_l_replicas, dense_x, None, device_ids)
 
         if args.record_gpu_time:    
             end.record()
             torch.cuda.synchronize()
             cling_bench_all['bot_time'].append(start.elapsed_time(end))
 
+        #check_cuda_memory_used('After parallel apply bot', device_ids)
+        
         # embeddings
         if args.record_gpu_time:    
             start.record()
+
             
         ly = self.apply_emb(lS_o, lS_i, self.emb_l, self.v_W_l)
 
@@ -1025,8 +1260,15 @@ class DLRM_Net(nn.Module):
         else:
             z0 = p0
 
-        #print("z0:",z0[0:32])
+        if args.debug_m3:    
+            print("z0:",z0[0:4].transpose(0,1).detach().cpu())
+            
         cling_bench_all['prob'].append(z)
+
+        #clear gpu memory
+        #self.bot_l_replicas = None
+        #self.top_l_replicas = None
+        #torch.cuda.empty_cache()
         
         return z0
 
@@ -1074,12 +1316,39 @@ def inference(
     if args.mlperf_logging:
         scores = []
         targets = []
+    #cling inference start
+    check_cuda_memory_used("Inference", range(ndevices))    
 
+    print("ndevice:", ndevices)
 
+    if ndevices > 1:
+        dlrm.replicas_mlp(ndevices)
+        dlrm.distribute_emb(ndevices)
+    #######################
+    # if self.parallel_model_is_not_prepared or self.sync_dense_params:
+    #     # replicate mlp (data parallelism)
+            
+    #     self.bot_l_replicas = replicate(self.bot_l, device_ids)
+            
+    #     #check_cuda_memory_used('replicas bot', device_ids)
+    #     self.top_l_replicas = replicate(self.top_l, device_ids)
+    #     #check_cuda_memory_used('replicas top', device_ids)
+        
+    #     self.parallel_model_batch_size = batch_size
+    
+    #######################
+    #sys.exit()    
     print("Inference start:")
-    for i, testBatch in enumerate(test_ld):
-        start_time = time.perf_counter()
+    batch_time_all_start = time.perf_counter()
 
+    for i, testBatch in enumerate(test_ld):
+        per_batch_start_time = time.perf_counter()
+
+        if i==0:
+            cling_bench_all['per_batch_load_time'].append(1000*(per_batch_start_time - batch_time_all_start))
+        else:
+            cling_bench_all['per_batch_load_time'].append(1000*(per_batch_start_time - per_batch_end_time))
+            
         if nbatches > 0 and i >= nbatches:
             break
 
@@ -1094,6 +1363,9 @@ def inference(
 
         # forward pass
 
+        # print("before lso lsi:", lS_o_test)
+        # print("before lso lsi:", lS_i_test)
+
         Z_test = dlrm_wrap(
             X_test,
             lS_o_test,
@@ -1102,6 +1374,22 @@ def inference(
             device,
             ndevices=ndevices,
         )
+
+        # for cl in range(10):
+        #     Z_test = dlrm_wrap(
+        #         X_test,
+        #         lS_o_test,
+        #         lS_i_test,
+        #         use_gpu,
+        #         device,
+        #         ndevices=ndevices,
+        #     )
+            
+        # sys.exit()
+        #print(X_test)
+        # print("after lso lsi:", lS_o_test)
+        # print("after lso lsi:", lS_i_test)
+        
 
         if Z_test.is_cuda:
             torch.cuda.synchronize()
@@ -1126,8 +1414,10 @@ def inference(
                 test_accu += A_test
                 test_samp += mbs_test
                 
-        cling_bench_all['per_batch_time'].append(1000*(time.perf_counter() - start_time))
-                
+        per_batch_end_time = time.perf_counter()        
+        cling_bench_all['per_batch_comp_time'].append(1000*(per_batch_end_time - per_batch_start_time))
+
+    print("batch_time_all:", 1000*(time.perf_counter()-batch_time_all_start))            
     if args.mlperf_logging:
         with record_function("DLRM mlperf sklearn metrics compute"):
             scores = np.concatenate(scores, axis=0)
@@ -1212,79 +1502,127 @@ def inference(
         
 
     #print("ndevices:", ndevices)
+    #cling def
     if True:
 
         if ndevices > 1:
-            print("batch index, rep_mlp(ms), dis_emb(ms), dis_den(ms), dis_spa(ms), sca_emd(ms), mlp_bot(ms), mlp_top(ms), embedding(ms), ops_feature(ms), p_gather(ms), per_batch_time(ms), ratio(%)")
+            if not args.record_gpu_time:
+                print("batch index, per_batch_comp_time(ms), per_batch_load_time(ms)")
+                for i in range(0, len(cling_bench_all['per_batch_comp_time'])):
+                    
+                    per_batch_comp_time = cling_bench_all['per_batch_comp_time'][i]
+                    per_batch_load_time = cling_bench_all['per_batch_load_time'][i]
 
-            for i in range(0, len(cling_bench_all['per_batch_time'])):
-                   rep_mlp_time =cling_bench_all['rep_mlp_time'][i]
-                   dis_emb_time = cling_bench_all['dis_emb_time'][i]
-                   dis_den_time = cling_bench_all['dis_den_time'][i]
-                   dis_spa_time = cling_bench_all['dis_spa_time'][i]
-                   sca_emb_time = cling_bench_all['sca_emb_time'][i]
+                    print(
+                        str(i).rjust(len('batch index')) + ", " +
+                        "{:.2f}".format(per_batch_comp_time).rjust(len('per_batch_comp_time(ms)')) + ", " +
+                        "{:.2f}".format(per_batch_load_time).rjust(len('per_batch_load_time(ms)'))
+                    )
+                
+            else:    
+                print("batch index, rep_mlp(ms), dis_emb(ms), dis_den(ms), dis_spa(ms), sca_emd(ms), mlp_bot(ms), mlp_top(ms), embedding(ms), ops_feature(ms), p_gather(ms), per_batch_comp_time(ms), per_batch_load_time(ms), ratio(%)")
 
-                   bot_time =cling_bench_all['bot_time'][i]
-                   top_time = cling_bench_all['top_time'][i]
-                   emb_time = cling_bench_all['emb_time'][i]
-                   ops_time = cling_bench_all['ops_time'][i]
-
-                   p_gather_time = cling_bench_all['p_gather_time'][i]
-                   
-                   per_batch_time = cling_bench_all['per_batch_time'][i]
-                   prob = cling_bench_all['prob'][i]
-                   print(
-                       str(i).rjust(len('batch index')) + ", " +
-                       "{:.2f}".format(rep_mlp_time).rjust(len('rep_mlp(ms)')) + ", " +
-                       "{:.2f}".format(dis_emb_time).rjust(len('dis_emb(ms)')) + ", " +
-                       "{:.2f}".format(dis_den_time).rjust(len('dis_den(ms)')) + ", " +
-                       "{:.2f}".format(dis_spa_time).rjust(len('dis_spa(ms)')) + ", " +
-                       "{:.2f}".format(sca_emb_time).rjust(len('sca_emb(ms)')) + ", " +
-
+                for i in range(0, len(cling_bench_all['per_batch_comp_time'])):
+                    rep_mlp_time =cling_bench_all['rep_mlp_time'][i]
+                    dis_emb_time = cling_bench_all['dis_emb_time'][i]
+                    dis_den_time = cling_bench_all['dis_den_time'][i]
+                    dis_spa_time = cling_bench_all['dis_spa_time'][i]
+                    sca_emb_time = cling_bench_all['sca_emb_time'][i]
+                    
+                    bot_time =cling_bench_all['bot_time'][i]
+                    top_time = cling_bench_all['top_time'][i]
+                    emb_time = cling_bench_all['emb_time'][i]
+                    ops_time = cling_bench_all['ops_time'][i]
+                    
+                    p_gather_time = cling_bench_all['p_gather_time'][i]
+                    
+                    per_batch_comp_time = cling_bench_all['per_batch_comp_time'][i]
+                    per_batch_load_time = cling_bench_all['per_batch_load_time'][i]
+                    
+                    prob = cling_bench_all['prob'][i]
+                    print(
+                        str(i).rjust(len('batch index')) + ", " +
+                        "{:.2f}".format(rep_mlp_time).rjust(len('rep_mlp(ms)')) + ", " +
+                        "{:.2f}".format(dis_emb_time).rjust(len('dis_emb(ms)')) + ", " +
+                        "{:.2f}".format(dis_den_time).rjust(len('dis_den(ms)')) + ", " +
+                        "{:.2f}".format(dis_spa_time).rjust(len('dis_spa(ms)')) + ", " +
+                        "{:.2f}".format(sca_emb_time).rjust(len('sca_emb(ms)')) + ", " +
+                        
                        
-                       "{:.2f}".format(bot_time).rjust(len('mlp_bot(ms)')) + ", " +
-                       "{:.2f}".format(top_time).rjust(len('mlp_top(ms)')) + ", " +
-                       "{:.2f}".format(emb_time).rjust(len('embedding(ms)')) + ", " +
-                       "{:.2f}".format(ops_time).rjust(len('ops_feature(ms)')) + ", " +
+                        "{:.2f}".format(bot_time).rjust(len('mlp_bot(ms)')) + ", " +
+                        "{:.2f}".format(top_time).rjust(len('mlp_top(ms)')) + ", " +
+                        "{:.2f}".format(emb_time).rjust(len('embedding(ms)')) + ", " +
+                        "{:.2f}".format(ops_time).rjust(len('ops_feature(ms)')) + ", " +
+                        
+                        "{:.2f}".format(p_gather_time).rjust(len('p_gather(ms)')) + ", " +
 
-                       "{:.2f}".format(p_gather_time).rjust(len('p_gather(ms)')) + ", " +
+                        "{:.2f}".format(per_batch_comp_time).rjust(len('per_batch_comp_time(ms)')) + ", " +
+                        "{:.2f}".format(per_batch_load_time).rjust(len('per_batch_load_time(ms)')) + ", " +
 
-                       "{:.2f}".format(per_batch_time).rjust(len('per_batch_time(ms)')) + ", " +
-                       "{:.2f}".format(100*((bot_time+top_time+emb_time+ops_time)/per_batch_time)).rjust(len('ratio(%)'))
-                   )
+                        "{:.2f}".format(100*((bot_time+top_time+emb_time+ops_time)/per_batch_comp_time)).rjust(len('ratio(%)'))
+                    )
                    
         else:    
+            print("batch index, mlp_bot(ms), mlp_top(ms), embedding(ms), ops_feature(ms), per_batch_comp_time(ms), per_batch_load_time(ms), ratio(%)")
+
+            for i in range(0, len(cling_bench_all['per_batch_comp_time'])):
+
+                bot_time =cling_bench_all['bot_time'][i]
+                top_time = cling_bench_all['top_time'][i]
+                emb_time = cling_bench_all['emb_time'][i]
+                ops_time = cling_bench_all['ops_time'][i]
+                per_batch_comp_time = cling_bench_all['per_batch_comp_time'][i]
+                per_batch_load_time = cling_bench_all['per_batch_load_time'][i]
+
+                prob = cling_bench_all['prob'][i]
+                
+                print(
+                    str(i).rjust(len('batch index')) + ", " +
+                    "{:.2f}".format(bot_time).rjust(len('mlp_bot(ms)')) + ", " +
+                    "{:.2f}".format(top_time).rjust(len('mlp_top(ms)')) + ", " +
+                    "{:.2f}".format(emb_time).rjust(len('embedding(ms)')) + ", " +
+                    "{:.2f}".format(ops_time).rjust(len('ops_feature(ms)')) + ", " +
+                    "{:.2f}".format(per_batch_comp_time).rjust(len('per_batch_comp_time(ms)')) + ", " +
+                    "{:.2f}".format(per_batch_load_time).rjust(len('per_batch_load_time(ms)')) + ", " +
+
+                    "{:.2f}".format(100*((bot_time+top_time+emb_time+ops_time)/per_batch_comp_time)).rjust(len('ratio(%)'))
+                )
+
+        #end 
         
-            print("batch index, mlp_bot(ms), mlp_top(ms), embedding(ms), ops_feature(ms), per_batch_time(ms), ratio(%)")
-
-            for i in range(0, len(cling_bench_all['per_batch_time'])):
-
-                   bot_time =cling_bench_all['bot_time'][i]
-                   top_time = cling_bench_all['top_time'][i]
-                   emb_time = cling_bench_all['emb_time'][i]
-                   ops_time = cling_bench_all['ops_time'][i]
-                   per_batch_time = cling_bench_all['per_batch_time'][i]
-                   prob = cling_bench_all['prob'][i]
-            
-                   print(
-                       str(i).rjust(len('batch index')) + ", " +
-                       "{:.2f}".format(bot_time).rjust(len('mlp_bot(ms)')) + ", " +
-                       "{:.2f}".format(top_time).rjust(len('mlp_top(ms)')) + ", " +
-                       "{:.2f}".format(emb_time).rjust(len('embedding(ms)')) + ", " +
-                       "{:.2f}".format(ops_time).rjust(len('ops_feature(ms)')) + ", " +
-                       "{:.2f}".format(per_batch_time).rjust(len('per_batch_time(ms)')) + ", " +
-                       "{:.2f}".format(100*((bot_time+top_time+emb_time+ops_time)/per_batch_time)).rjust(len('ratio(%)'))
-                   )
-
-
         warm_up = 1
         print("warm up value:", warm_up)
-        print("bot mean time (ms): {:.2f}".format(sum(cling_bench_all['bot_time'][warm_up:])/len(cling_bench_all['bot_time'][warm_up:])))     
-        print("top mean time (ms): {:.2f}".format(sum(cling_bench_all['top_time'][warm_up:])/len(cling_bench_all['top_time'][warm_up:])))     
-        print("emb mean time (ms): {:.2f}".format(sum(cling_bench_all['emb_time'][warm_up:])/len(cling_bench_all['emb_time'][warm_up:])))     
-        print("ops mean time (ms): {:.2f}".format(sum(cling_bench_all['ops_time'][warm_up:])/len(cling_bench_all['ops_time'][warm_up:])))     
-        print("per batch mean time (ms): {:.2f}".format(sum(cling_bench_all['per_batch_time'][warm_up:])/len(cling_bench_all['per_batch_time'][warm_up:])))     
-    
+        if len(cling_bench_all['bot_time'][warm_up:]) > 0:
+            
+            print("Computation Details: ******")
+            mean_bot = sum(cling_bench_all['bot_time'][warm_up:])/len(cling_bench_all['bot_time'][warm_up:])
+            mean_top = sum(cling_bench_all['top_time'][warm_up:])/len(cling_bench_all['top_time'][warm_up:])
+            mean_emb = sum(cling_bench_all['emb_time'][warm_up:])/len(cling_bench_all['emb_time'][warm_up:])
+            mean_ops = sum(cling_bench_all['ops_time'][warm_up:])/len(cling_bench_all['ops_time'][warm_up:])
+            mean_load = sum(cling_bench_all['per_batch_load_time'][warm_up:])/len(cling_bench_all['per_batch_load_time'][warm_up:])
+            mean_comp = sum(cling_bench_all['per_batch_comp_time'][warm_up:])/len(cling_bench_all['per_batch_comp_time'][warm_up:])
+            
+            print("per batch mean time for bot/top/emb/ops/comp/load (ms): {:.2f}  {:.2f} {:.2f} {:.2f} {:.2f} {:.2f}".format(mean_bot, mean_top, mean_emb, mean_ops, mean_comp, mean_load))
+            print("**************")
+
+        if ndevices > 1:
+            mean_rep_mlp = sum(cling_bench_all['rep_mlp_time'][warm_up:])/len(cling_bench_all['rep_mlp_time'][warm_up:])
+            mean_dis_emd = sum(cling_bench_all['dis_emb_time'][warm_up:])/len(cling_bench_all['dis_emb_time'][warm_up:])
+            mean_dis_den = sum(cling_bench_all['dis_den_time'][warm_up:])/len(cling_bench_all['dis_den_time'][warm_up:])
+            mean_dis_spa = sum(cling_bench_all['dis_spa_time'][warm_up:])/len(cling_bench_all['dis_spa_time'][warm_up:])
+            mean_sca_emb = sum(cling_bench_all['sca_emb_time'][warm_up:])/len(cling_bench_all['sca_emb_time'][warm_up:])
+            mean_gather = sum(cling_bench_all['p_gather_time'][warm_up:])/len(cling_bench_all['p_gather_time'][warm_up:])
+            print("per batch mean time for rep_mlp/d_emb/d_den/d_spa/s_emb/gather (ms): {:.2f} {:.2f} {:.2f} {:.2f} {:.2f} {:.2f}".format(mean_rep_mlp, mean_dis_emd, mean_dis_den, mean_dis_spa, mean_sca_emb, mean_gather))
+
+        # if len(cling_bench_all['per_batch_comp_time'][warm_up:]) > 0:
+        #     mean_load = sum(cling_bench_all['per_batch_load_time'][warm_up:])/len(cling_bench_all['per_batch_load_time'][warm_up:])
+        #     mean_comp = sum(cling_bench_all['per_batch_comp_time'][warm_up:])/len(cling_bench_all['per_batch_comp_time'][warm_up:])
+        #     print("per batch mean time for comp/load/all (ms): {:.2f} {:.2f} {:.2f}".format(mean_comp, mean_load, (mean_load+mean_comp)))     
+        #     #print("per batch comp mean time (ms): {:.2f}".format(mean_comp))
+        #     print("computation-to-all(%): {:.2f} ".format(mean_comp/(mean_comp+mean_load)))
+
+            
+
     return model_metrics_dict, is_best
 
 
@@ -1302,9 +1640,11 @@ def run():
     )
     # j will be replaced with the table number
     parser.add_argument("--arch-mlp-bot", type=dash_separated_ints, default="4-3-2")
+    parser.add_argument("--no-mlp-bot", action="store_true", default=False)
+    
     parser.add_argument("--arch-mlp-top", type=dash_separated_ints, default="4-2-1")
     parser.add_argument(
-        "--arch-interaction-op", type=str, choices=["dot", "cat"], default="dot"
+        "--arch-interaction-op", type=str, choices=["dot", "cat", "mean"], default="dot"
     )
     parser.add_argument("--arch-interaction-itself", action="store_true", default=False)
     parser.add_argument("--weighted-pooling", type=str, default=None)
@@ -1430,9 +1770,6 @@ def run():
     global writer
     args = parser.parse_args()
     # print("m3: ", args.arch_mlp_m3)
-
-    if args.record_gpu_time:
-        sys.exit("eeo")
     
     if args.dataset_multiprocessing:
         assert float(sys.version[:3]) > 3.7, (
@@ -1596,15 +1933,18 @@ def run():
             num_int = (num_fea * (num_fea - 1)) // 2 + m_den_out
     elif args.arch_interaction_op == "cat":
         num_int = num_fea * m_den_out
+    elif args.arch_interaction_op == "mean":
+        num_int = m_den_out #+ args.arch_sparse_feature_size
     else:
         sys.exit(
             "ERROR: --arch-interaction-op="
             + args.arch_interaction_op
             + " is not supported"
         )
+
+        
     arch_mlp_top_adjusted = str(num_int) + "-" + args.arch_mlp_top
-
-
+    #print("arch_mlp_top_adjusted: ", arch_mlp_top_adjusted)
     if args.use_m3_top_mlp:
         layer_info = ''
         for li in range (0, args.arch_m3_mlp_lys):
@@ -1617,6 +1957,9 @@ def run():
         ln_top = np.fromstring(layer_info, dtype=int, sep=",")       
     else:
         ln_top = np.fromstring(arch_mlp_top_adjusted, dtype=int, sep="-")
+
+    #print("ln_top", ln_top)    
+    #sys.exit()
 
     # sanity check: feature sizes and mlp dimensions must match
     if m_den != ln_bot[0]:
@@ -1760,8 +2103,10 @@ def run():
         weighted_pooling=args.weighted_pooling,
         loss_function=args.loss_function,
     )
-    if args.debug_m3:
-        print(dlrm)
+
+
+    # if args.debug_m3:
+    #     print(dlrm)
         
     # test prints
     if args.debug_mode:
@@ -1774,7 +2119,33 @@ def run():
         # Custom Model-Data Parallel
         # the mlps are replicated and use data parallelism, while
         # the embeddings are distributed and use model parallelism
+        print("dlrm to device: ", device)
+        check_cuda_memory_used('Before dlrm to device', range(ndevices))
+        
         dlrm = dlrm.to(device)  # .cuda()
+        # x = torch.randn(1000, 1000).cuda()
+
+        # y = x*2
+
+        # del x
+
+        # z = y * 3
+        # k = y * 4
+        # del k
+        # #del y
+        # del z
+        # m = y * 6
+        # mm = y * 7
+        # zz = y * 9
+        check_cuda_memory_used('After dlrm to device', range(ndevices))
+
+        #dlrm = None
+        #del dlrm
+        #torch.cuda.empty_cache()
+        #torch.cuda.caching_allocator_delete(dlrm)
+        #torch.cuda.memory_stats(device="cuda:0")
+        # check_cuda_memory_used('After free dlrm to device', range(ndevices))
+        
         if dlrm.ndevices > 1:
             # if args.arch_m3_emb:
             #     print("multi-gpu: create m3_emb")
@@ -1785,6 +2156,9 @@ def run():
             dlrm.emb_l, dlrm.v_W_l = dlrm.create_emb(
                 m_spa, ln_emb, args.weighted_pooling
             )
+            print(dlrm.emb_l)
+            check_cuda_memory_used('After create_emb', range(ndevices))
+            #sys.exit()
         else:
             if dlrm.weighted_pooling == "fixed":
                 for k, w in enumerate(dlrm.v_W_l):
@@ -1973,7 +2347,7 @@ def run():
 
     tb_file = "./" + args.tensor_board_filename
     writer = SummaryWriter(tb_file)
-    print(tb_file)
+    #print(tb_file)
     #sys.exit()
     ext_dist.barrier()
     with torch.autograd.profiler.profile(
