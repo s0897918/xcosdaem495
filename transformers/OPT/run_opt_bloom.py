@@ -34,7 +34,7 @@ def run_benchmark_rand_input():
         for b in range (0, batch_exp):
             batch = 2**b
             global_seed = torch.Generator()
-            input_ids = torch.randint(20, 5000, (batch, 128), generator=global_seed.manual_seed(1000))
+            input_ids = torch.randint(20, 5000, (batch, q), generator=global_seed.manual_seed(1000))
             input_ids = input_ids.to(device)
                 
             # warm_up
