@@ -29,7 +29,6 @@ def test_sd2(args):
     warm_up = args.warm_up
     generation = args.generation
     compile_mode = args.torch_compile_mode
-    
 
     print(args)
 
