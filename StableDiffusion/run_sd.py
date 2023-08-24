@@ -56,7 +56,7 @@ def test_sd2(args):
     ed = torch.cuda.Event(enable_timing=True)
 
     # warm up
-    print("compile the model:")
+    print("compile the model and run for warm up:")
     for _ in range(warm_up):
         image = pipe(prompt, num_inference_steps=inference_step, num_images_per_prompt=batch_size, height=height, width=width).images[0]
 
@@ -72,7 +72,7 @@ def test_sd2(args):
     ms = st.elapsed_time(ed) / generation
     torch.cuda.nvtx.range_pop()
     print('Model: ' + model_id + '\nGeneration time: {:2f}'.format(ms) + '(ms)' +' \nPerformance: {:.2f}'.format(inference_step / ms * 1000) + '(iter/s)')
-    # image.save("astronaut_rides_horse.png")
+    image.save(prompt+".png")
 
 if __name__ == '__main__':
     test_sd2(args)
